@@ -18,10 +18,13 @@ classifiers = [
   "Topic :: Software Development :: Quality Assurance",
 ]
 
-# The core has no LLM SDK, no web framework and no database driver.
+# The core (src/hashira/core, src/hashira/ports) has no LLM SDK, no web
+# framework and no database driver — enforced by tests/contract/test_core_purity.py.
+# SQLAlchemy Core lives only in src/hashira/storage/sqlite, behind the ports.
 # See docs/ARCHITECTURE.md, guardrail 7.
 dependencies = [
   "pydantic>=2.7,<3",
+  "sqlalchemy>=2.0,<3",
 ]
 
 [project.optional-dependencies]

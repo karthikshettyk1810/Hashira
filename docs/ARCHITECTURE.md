@@ -35,10 +35,32 @@ runtime (§6). This is enforced, not just documented — see
 reach persistence, adapters and AI providers. A port may import `core` (it needs
 the types) but nothing concrete: no `sqlite3`, no `psycopg`, no HTTP client.
 Concrete implementations live in `storage/`, `adapters/`, and wherever the
-intelligence provider ends up, and are held to the port's contract by shared
-test suites (see `tests/contract/test_ports.py` for the pattern — the in-memory
-doubles there will be joined by a SQLite-backed and Postgres-backed suite run
-against the *same* test functions once those stores exist).
+intelligence provider ends up.
+
+Two storage backends exist today, both implementing every port in
+`src/hashira/ports/repositories.py`:
+
+- `hashira.storage.sqlite.SqliteDatabase` — the local-first default (§4). One
+  JSON column per record plus a handful of indexed filter columns
+  (`storage/sqlite/schema.py` explains the trade-off); every repository is
+  scoped to one `SqliteUnitOfWork` transaction over a single
+  `sqlalchemy.Connection`.
+- `hashira.storage.memory.MemoryDatabase` — in-process, copy-on-write
+  transactions, no file. Not asked for, but the cheapest way to make an
+  architectural claim testable: a shared suite
+  (`tests/contract/uow_conformance.py`, 23 test functions covering every
+  port method plus the §30 transactional guarantee) runs unmodified against
+  both backends by being imported (`from ... import *`) into each backend's
+  own fixture file. A future PostgreSQL backend is held to the exact same
+  suite — "the ports are a real abstraction" is therefore a fact the test
+  suite proves, not a claim this document makes on its own.
+
+One known, deliberate gap in both backends: `find_entities(revision=...)` and
+`get_relationships(revision=...)` raise `NotImplementedError` rather than
+guess. §13's "what did the architecture look like at revision X" needs a real
+ordering over Git revisions, which nothing produces yet — see
+[ROADMAP.md](ROADMAP.md#phase-1--core). `at: datetime` (wall-clock) queries
+work today via `Relationship.held_at()`.
 
 ## Why the core looks the way it does
 
@@ -135,10 +157,9 @@ success criterion in §35 is asking for.
 ## Storage default
 
 §21 recommends PostgreSQL as the authoritative store. This build makes
-**SQLite the local-first default** and Postgres an alternative implementation of
-the same `GraphRepository`/`EventStore`/etc. ports, selected by configuration.
+**SQLite the local-first default** (implemented — see
+[Dependency direction](#dependency-direction) above) with Postgres as a future
+alternative implementation of the same ports, selected by configuration.
 Rationale: §4 states "local-first where practical" and the package targets
-PyPI (§0) — `pip install hashira && hashira index` should work with zero
-infrastructure. Both stores implement the ports defined in
-`src/hashira/ports/repositories.py`; neither is permitted to leak a dialect
-above that boundary.
+PyPI (§0) — `pip install hashira && hashira index` works with zero
+infrastructure today, against a real store, not a stub.

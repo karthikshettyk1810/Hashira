@@ -36,11 +36,32 @@ Phases per spec §36, annotated with the MVP-scope decision recorded in
 - [ ] The **adversarial fixture suite** against real renames/extract-method/
       module-reorg diffs — deferred to Phase 2, once the Python language
       adapter exists to produce real candidates to feed the ladder.
-- [ ] SQLite implementation of every port (local-first default).
-- [ ] PostgreSQL implementation of every port (hosted/team store), held to the
-      same contract-test suite as SQLite.
-- [ ] `UnitOfWork` implementation with the transactional guarantee from §30:
-      a failed indexing run must not corrupt the last known-good snapshot.
+- [x] **SQLite implementation of every port** (local-first default) —
+      `src/hashira/storage/sqlite/`. One JSON-per-record column plus indexed
+      filter columns (schema.py); every port backed by a live
+      `sqlalchemy.Connection` scoped to one `SqliteUnitOfWork` transaction.
+- [x] **`UnitOfWork` implementation with the §30 transactional guarantee** —
+      a failed indexing run cannot corrupt the last known-good snapshot,
+      because its writes never become visible: forgetting to `commit()`, an
+      explicit `rollback()`, and an exception mid-transaction all behave
+      identically. Proven by
+      `test_a_failed_indexing_run_never_corrupts_the_last_known_good_snapshot`
+      in the shared conformance suite below, not just asserted.
+- [x] **A second port implementation, `hashira.storage.memory`** (in-process,
+      copy-on-write transactions) — not strictly asked for, but the cheapest
+      way to make "the ports are a real abstraction" a tested fact: one
+      shared suite (`tests/contract/uow_conformance.py`, 23 tests) runs
+      against both backends via `from ... import *` into each backend's own
+      fixture file (`tests/contract/test_memory_conformance.py`,
+      `tests/integration/test_sqlite_storage.py`). A future PostgreSQL
+      implementation is held to the exact same suite.
+- [ ] PostgreSQL implementation of every port (hosted/team store).
+- [ ] **Revision-scoped historical queries** (`find_entities(revision=...)`,
+      `get_relationships(revision=...)`) currently raise `NotImplementedError`
+      rather than guess — §13's historical queries need a real Git revision
+      ordering, which nothing produces yet. Closing this is Phase 2 work,
+      once the Git/History adapter exists. `at: datetime` (wall-clock)
+      queries work correctly today via `Relationship.held_at()`.
 
 ## Phase 2 — Python Ecosystem Intelligence (per the MVP scope decision)
 
@@ -132,13 +153,18 @@ Gates Phase 7. Copied here so it stays visible against the phase list above:
       (needs real adapter usage to prove, not just the contract tests).
 - [x] Provenance is mandatory for derived knowledge (enforced in
       `core/evidence.py`, `core/relationships.py`).
-- [x] Events are immutable and idempotent (enforced in `core/events.py`;
-      idempotency also needs a real store to prove at the persistence layer).
-- [ ] Snapshots are reproducible (needs the indexer; the model supports it).
+- [x] Events are immutable and idempotent (enforced in `core/events.py` and
+      proven at the persistence layer by the shared conformance suite against
+      both storage backends).
+- [ ] Snapshots are reproducible (needs the indexer; storage and the model
+      both support it — `SqliteSnapshotStore`/`MemoryDatabase` round-trip a
+      `Snapshot` and `latest_complete()` correctly ignores non-`COMPLETE`
+      ones, but nothing produces a real snapshot from source yet).
 - [ ] Incremental indexing works.
 - [ ] At least two language ecosystems map into the same semantic model.
-- [ ] Postgres persistence can rebuild a graph without vendor lock-in (SQLite
-      too, per this build's storage decision).
+- [x] SQLite persistence can rebuild a graph without vendor lock-in — the
+      port is the only thing an indexer talks to (`src/hashira/storage/sqlite/`).
+- [ ] The same is true of a PostgreSQL implementation, once it exists.
 - [ ] CLI and JSON APIs can query the same domain services.
 - [ ] MCP can expose read-only intelligence without modifying core.
 - [x] Tests cover identity, temporal, provenance and graph invariants
