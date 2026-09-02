@@ -40,6 +40,34 @@ class EntityType(StrEnum):
     CONSTRAINT = "CONSTRAINT"
 
 
+class IdentityClaimKind(StrEnum):
+    """The signals identity resolution may weigh (spec §10).
+
+    Ranked in ``hashira.identity.resolver`` by how much a single hit is worth
+    trusting on its own. The vocabulary is closed here for the same reason
+    every other enum in this module is: a new signal source is a deliberate
+    addition to the ladder's policy, not a string an adapter happens to invent.
+    """
+
+    SYMBOL_ID = "SYMBOL_ID"
+    """A stable language-level identifier from LSP/SCIP/compiler metadata."""
+
+    USER_DECLARED = "USER_DECLARED"
+    """An explicit human mapping. Outranks every inferred signal."""
+
+    GIT_RENAME = "GIT_RENAME"
+    """Git's own rename/similarity detection between two revisions."""
+
+    MIGRATION_LINEAGE = "MIGRATION_LINEAGE"
+    """A database migration's own record of a rename (e.g. ALTER TABLE ... RENAME)."""
+
+    QUALIFIED_NAME = "QUALIFIED_NAME"
+    """Same fully-qualified name. Common, but names get reused across files."""
+
+    STRUCTURAL_SIMILARITY = "STRUCTURAL_SIMILARITY"
+    """Same type, same container, similar signature. Weak on its own."""
+
+
 class RelationshipType(StrEnum):
     """Spec §11, plus one addition documented in docs/IR.md.
 

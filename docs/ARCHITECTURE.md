@@ -79,6 +79,38 @@ Before merging a change to `core/` or `ports/`, answer:
 If the answer to any of these is unclear, the feature does not go into `core/`
 yet — put it behind an adapter or an extension field until it is.
 
+## Hashira's own stack vs. what Hashira understands
+
+These are two separate lists and must never be confused:
+
+```
+                 HASHIRA ITSELF                         WHAT AN ADAPTER UNDERSTANDS
+                 (a Python package)                      (somebody else's project)
+        ┌──────────────┼──────────────┐
+        │              │              │                  Django · FastAPI · Flask
+       CLI          Core IR       Storage                 Celery · SQLAlchemy · Prisma
+      (Typer)      (Pydantic)   (SQLite/Postgres)          Kafka · Docker · Kubernetes
+```
+
+Hashira's own runtime dependencies are and will stay lean: Pydantic for the
+domain (already in `pyproject.toml`), Typer for the CLI, SQLite/SQLAlchemy for
+local persistence, Alembic for its own migrations, `psycopg` for the optional
+Postgres path, `ast`/tree-sitter for parsing, and FastAPI only once an actual
+HTTP API is needed (not before). None of these are committed as dependencies
+yet beyond Pydantic — they land as each phase in [ROADMAP.md](ROADMAP.md)
+starts, not speculatively.
+
+**Django, FastAPI, Celery, Spring, Kafka, Kubernetes, etc. are never Hashira
+dependencies.** They are the *ecosystems a framework/data/async/infrastructure
+adapter knows how to read* in someone else's target repository (§18). When
+[ADAPTERS.md](ADAPTERS.md) or the roadmap says "Django adapter," it means
+"Hashira can inspect and semantically understand a Django application" —
+never "Hashira is built with Django." `tests/contract/test_core_purity.py`
+enforces the sharper half of this rule (no infra import in `core/`); this
+section exists to keep the softer half — adapter *targets* not becoming
+Hashira *dependencies* — a stated design decision rather than an easy accident
+to fall into later.
+
 ## MVP scope for this build
 
 Per the working decision behind this implementation (not a change to the spec's

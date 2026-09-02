@@ -474,9 +474,7 @@
               "$ref": "#/$defs/Confidence"
             },
             "kind": {
-              "description": "Signal name, e.g. 'symbol_id', 'qualified_name', 'git_rename', 'declared'.",
-              "title": "Kind",
-              "type": "string"
+              "$ref": "#/$defs/IdentityClaimKind"
             },
             "observed_at": {
               "format": "date-time",
@@ -499,6 +497,19 @@
           ],
           "title": "IdentityClaim",
           "type": "object"
+        },
+        "IdentityClaimKind": {
+          "description": "The signals identity resolution may weigh (spec \u00a710).\n\nRanked in ``hashira.identity.resolver`` by how much a single hit is worth\ntrusting on its own. The vocabulary is closed here for the same reason\nevery other enum in this module is: a new signal source is a deliberate\naddition to the ladder's policy, not a string an adapter happens to invent.",
+          "enum": [
+            "SYMBOL_ID",
+            "USER_DECLARED",
+            "GIT_RENAME",
+            "MIGRATION_LINEAGE",
+            "QUALIFIED_NAME",
+            "STRUCTURAL_SIMILARITY"
+          ],
+          "title": "IdentityClaimKind",
+          "type": "string"
         },
         "Origin": {
           "description": "Where a claim came from. Determines its default confidence.",
@@ -2084,10 +2095,10 @@
       "type": "object"
     }
   },
-  "$id": "https://hashira.dev/schema/ir/0.1.0.json",
+  "$id": "https://hashira.dev/schema/ir/0.1.1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "adapterContractVersion": "0.1.0",
   "eventSchemaVersion": "0.1.0",
   "title": "Hashira System IR",
-  "version": "0.1.0"
+  "version": "0.1.1"
 }

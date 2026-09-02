@@ -1,7 +1,7 @@
 # System IR
 
 The canonical intermediate representation of a software system (spec §7).
-Current version: `0.1.0` (`hashira.core.IR_VERSION`).
+Current version: `0.1.1` (`hashira.core.IR_VERSION`).
 
 System IR is not an AST. It describes structural reality (what exists),
 behavioral reality (what happens), and historical reality (what changed and
@@ -36,6 +36,17 @@ Three separate version numbers are tracked deliberately (`core/schema.py`):
 promises to implement), and `EVENT_SCHEMA_VERSION` (the event envelope). They
 move independently — an adapter can gain a capability without the event
 envelope changing, and vice versa.
+
+## Changelog
+
+- **0.1.1** — `IdentityClaim.kind` narrowed from a free string to the closed
+  `IdentityClaimKind` enum, so the identity resolution ladder
+  (`hashira.identity.resolver`) has a fixed vocabulary to rank rather than
+  whatever string an adapter happened to write. Bumped rather than folded
+  silently into 0.1.0 because narrowing a field's type is a producer-facing
+  change, even pre-release — exercising the version-bump path for real, on
+  the first contract change, is the point of having it.
+- **0.1.0** — initial frozen contract (§44).
 
 ## Deviations from the literal spec text
 
@@ -109,16 +120,40 @@ causal conclusions).
 
 The spec describes identity resolution as a list of signals to consider
 (stable symbol ids, qualified names, Git rename history, migration lineage,
-user declarations) rather than an algorithm. This build represents each
-signal as an `IdentityClaim` (`core/entities.py`) with its own origin and
-confidence, and `Entity.strongest_claim()` picks the best claim of a given
-kind for a tie-break.
+user declarations) rather than an algorithm. Each signal is represented as an
+`IdentityClaim` (`core/entities.py`) with its own kind (`IdentityClaimKind`),
+origin and confidence.
 
-**What is not yet decided:** the resolution ladder itself — which signal wins
-when two disagree, and the confidence floor below which a new entity is
-minted rather than merged into an existing one. That is Phase 1 work with its
-own adversarial fixture suite (renamed files, extracted methods, moved
-modules); this contracts layer only guarantees that whatever the ladder
-decides, the decision is recorded as claims and, when it changes an existing
-entity's identity, as a `SUPERSEDES` edge plus an `ENTITY_IDENTITY_MERGED`
-event — never a silent overwrite.
+**The ladder is implemented** in `hashira.identity.resolver`
+(`src/hashira/identity/`), as pure decision logic with no storage or adapter
+dependency — see the module's docstring for the full policy. Summary:
+
+| Signal tier | Kinds | Alone | Corroborated (2+ meaningful kinds) |
+| --- | --- | --- | --- |
+| Strong | `SYMBOL_ID`, `USER_DECLARED` | `MATCHED` (merge) | `MATCHED` |
+| Corroborating | `GIT_RENAME`, `MIGRATION_LINEAGE`, `QUALIFIED_NAME` | `SUPERSEDES` (lineage) | `MATCHED` |
+| Weak | `STRUCTURAL_SIMILARITY` | `NEW` (dropped) | never promotes anything |
+
+`resolve()` returns one of four outcomes — `NEW`, `SUPERSEDES`, `MATCHED`,
+`AMBIGUOUS` (two existing entities tie at the top tier; resolution refuses to
+guess and `apply()` surfaces a `SPECULATIVE` `HYPOTHESIS`-class `Inference`
+instead of picking one). `apply()` turns a decision into the records a caller
+persists: a merged `Entity` for `MATCHED`, or a new `Entity` plus a
+`SUPERSEDED`-status copy of the old one plus a `SUPERSEDES` `Relationship` for
+`SUPERSEDES` — never a silent overwrite, satisfying the entity model's own
+invariant that a `SUPERSEDED` entity must retain the claims that justified it.
+
+Test coverage lives in `tests/unit/test_identity.py`: exact-match merges,
+corroborated merges, single-signal lineage, weak-signal-alone rejection,
+weak-signal-fails-to-promote, cross-type exclusion, ties/`AMBIGUOUS`, and the
+`apply()` output shape for all four outcomes.
+
+**Still open**, and explicitly out of scope for this pass: wiring the
+resolver into an actual ingestion pipeline (which does not exist yet — no
+adapter has ever called this code), and the adversarial fixture suite against
+*real* renames/extract-method/module-reorg diffs from a fixture repository
+(Phase 2 work, once the Python language adapter exists to produce candidates
+to feed it). The ladder's tier thresholds are also a first cut, not a
+final answer — they are structured so a Phase 2 fixture failure updates one
+constant (`_STRONG`/`_CORROBORATING`/`match_floor`) rather than the algorithm's
+shape.

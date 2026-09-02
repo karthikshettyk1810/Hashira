@@ -29,23 +29,48 @@ Phases per spec §36, annotated with the MVP-scope decision recorded in
       (`src/hashira/core/schema.py`, `scripts/export_schema.py`).
 - [x] Contract tests: core purity (no infra imports, one-way dependency),
       schema stability, port satisfiability (`tests/contract/`).
-- [ ] **Identity resolution ladder** and its adversarial fixture suite
-      (renames, extract-method, module reorgs) — see
-      [IR.md's open item](IR.md#identity-resolution-10--status). Load-bearing;
-      should land before Phase 2 writes real entities against it.
+- [x] **Identity resolution ladder** — `src/hashira/identity/resolver.py`,
+      20 tests in `tests/unit/test_identity.py`. See
+      [IR.md's status section](IR.md#identity-resolution-10--status) for the
+      policy and what is still open.
+- [ ] The **adversarial fixture suite** against real renames/extract-method/
+      module-reorg diffs — deferred to Phase 2, once the Python language
+      adapter exists to produce real candidates to feed the ladder.
 - [ ] SQLite implementation of every port (local-first default).
 - [ ] PostgreSQL implementation of every port (hosted/team store), held to the
       same contract-test suite as SQLite.
 - [ ] `UnitOfWork` implementation with the transactional guarantee from §30:
       a failed indexing run must not corrupt the last known-good snapshot.
 
-## Phase 2 — Indexing (Python-deep, per the MVP scope decision)
+## Phase 2 — Python Ecosystem Intelligence (per the MVP scope decision)
+
+Renamed from "Python/Django/Celery indexer" for a reason: this phase is
+Hashira learning to read a Django/Celery **target project** — see
+[ARCHITECTURE.md#hashiras-own-stack-vs-what-hashira-understands](ARCHITECTURE.md#hashiras-own-stack-vs-what-hashira-understands).
+None of the frameworks below become a Hashira dependency.
+
+```
+HistoryAdapter        LanguageAdapter        FrameworkAdapter        DataAdapter        AsyncAdapter
+    Git          →     Python (ast/         →  Django, FastAPI   →   Django ORM,   →    Celery, Kafka
+                        tree-sitter)                                 SQLAlchemy,
+                                                                      migrations
+```
+
+The Python language adapter must produce a useful, if shallower, graph entirely
+on its own — plain imports, calls, class hierarchy — before any framework
+enricher is layered on. That ordering is what keeps the universal model honest:
+if `INTERFACE`/`DATA_ENTITY`/`PROCESS` only ever show up *with* a framework
+adapter attached, something has leaked framework-specific assumptions into the
+core rather than the adapter.
 
 - [ ] Git adapter (repository discovery, commit/rename history, revisions).
 - [ ] Python language adapter (AST/tree-sitter-based symbol and import
-      extraction).
-- [ ] Django framework adapter (views/URLs → `INTERFACE`, models → `DATA_ENTITY`).
-- [ ] Celery framework adapter (tasks → `PROCESS`, queues → `MESSAGE_CHANNEL`).
+      extraction) — must stand alone against a plain-Python fixture repo.
+- [ ] Django framework enricher — reads a target Django app; views/URLs →
+      `INTERFACE`, models → `DATA_ENTITY`. Ships as one adapter among several
+      `FrameworkAdapter` implementations, not as a Hashira dependency.
+- [ ] Celery async enricher — reads a target Celery app; tasks → `PROCESS`,
+      queues → `MESSAGE_CHANNEL`.
 - [ ] Postgres data adapter, from migrations/schema (§21: "do not make vector
       search the source of truth" applies here too — schema facts come from
       migrations, not inference).

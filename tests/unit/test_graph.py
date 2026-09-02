@@ -14,6 +14,7 @@ from hashira.core import (
     EntityType,
     Evidence,
     IdentityClaim,
+    IdentityClaimKind,
     KnowledgeClass,
     Origin,
     Relationship,
@@ -52,23 +53,23 @@ def test_strongest_claim_breaks_ties_by_confidence(system: System) -> None:
         name="process",
         identity_claims=[
             IdentityClaim(
-                kind="qualified_name",
+                kind=IdentityClaimKind.QUALIFIED_NAME,
                 value="old.path.process",
                 origin=Origin.PARSER,
                 confidence=Confidence.LIKELY,
             ),
             IdentityClaim(
-                kind="qualified_name",
+                kind=IdentityClaimKind.QUALIFIED_NAME,
                 value="payments.services.PaymentService.process",
                 origin=Origin.USER_DECLARED,
                 confidence=Confidence.CERTAIN,
             ),
         ],
     )
-    strongest = entity.strongest_claim("qualified_name")
+    strongest = entity.strongest_claim(IdentityClaimKind.QUALIFIED_NAME)
     assert strongest is not None
     assert strongest.value == "payments.services.PaymentService.process"
-    assert entity.strongest_claim("symbol_id") is None
+    assert entity.strongest_claim(IdentityClaimKind.SYMBOL_ID) is None
 
 
 def _edge(system: System, a: Entity, b: Entity, ev: Evidence, **kw: object) -> Relationship:

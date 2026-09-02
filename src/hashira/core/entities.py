@@ -7,7 +7,7 @@ from datetime import datetime
 from pydantic import Field, model_validator
 
 from .base import IRModel, SourceLocation, TechnologyInfo, utc_now
-from .enums import Confidence, EntityStatus, EntityType, Origin
+from .enums import Confidence, EntityStatus, EntityType, IdentityClaimKind, Origin
 from .ids import EntityID, IDPrefix, SystemID, entity_uri, new_id, system_uri
 
 
@@ -40,9 +40,7 @@ class IdentityClaim(IRModel):
     and how strongly, so a wrong merge can be explained and undone.
     """
 
-    kind: str = Field(
-        description="Signal name, e.g. 'symbol_id', 'qualified_name', 'git_rename', 'declared'."
-    )
+    kind: IdentityClaimKind
     value: str
     origin: Origin
     confidence: Confidence
@@ -94,7 +92,7 @@ class Entity(IRModel):
         """What to show a human: the qualified name when we have one."""
         return self.qualified_name or self.name
 
-    def strongest_claim(self, kind: str) -> IdentityClaim | None:
+    def strongest_claim(self, kind: IdentityClaimKind) -> IdentityClaim | None:
         """The best signal of a given kind, for resolution tie-breaks."""
         claims = [claim for claim in self.identity_claims if claim.kind == kind]
         if not claims:
