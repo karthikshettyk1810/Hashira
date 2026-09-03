@@ -120,6 +120,8 @@ INVERSE: dict[RelationshipType, str] = {
     RelationshipType.FIXED_BY: "FIXES",
     RelationshipType.RELATED_TO: "RELATED_TO",
     RelationshipType.SUPERSEDES: "SUPERSEDED_BY",
+    RelationshipType.MAPS_TO: "MAPPED_BY",
+    RelationshipType.REFERENCES: "REFERENCED_BY",
 }
 
 #: Edges an impact traversal follows by default (§25). Structural containment and
@@ -140,5 +142,7 @@ IMPACT_EDGES: frozenset[RelationshipType] = frozenset(
         RelationshipType.PUBLISHES,
         RelationshipType.SUBSCRIBES,
         RelationshipType.CONFIGURED_BY,
+        RelationshipType.MAPS_TO,
+        RelationshipType.REFERENCES,
     }
 )

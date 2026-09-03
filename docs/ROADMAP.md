@@ -361,12 +361,97 @@ core rather than the adapter.
     Django's `_extract_field_accesses` — association is handler-to-model,
     not model-field-to-handler), class-based endpoints (function handlers
     only), and multi-hop router nesting.
+- [x] **SQLAlchemy data adapter** (`src/hashira/adapters/sqlalchemy/`) — the
+      first `DataAdapter` (`ports/adapters.py`), a kind deliberately distinct
+      from `FrameworkAdapter`: it must never care whether the code it
+      enriches belongs to FastAPI, Django, a CLI, or nothing at all. Proven,
+      not just asserted — `tests/integration/test_sqlalchemy_identity.py`
+      indexes a framework-free fixture with *no* `FrameworkAdapter`
+      configured at all.
+  - **Detects both real-world declarative styles**: SQLAlchemy 2.0's
+    class-based root (`class Base(DeclarativeBase): pass`, resolvable
+    through Python's own `python.inheritance`) and the still-extremely-common
+    factory style (`Base = declarative_base()`, a plain module-level
+    variable Python's extractor never tracks — found by this adapter itself,
+    the same way `adapters.fastapi.adapter` finds `app = FastAPI()`). Both
+    feed one `known_bases` set expanded to a fixpoint, so a multi-level
+    hierarchy resolves regardless of which style introduced its root — this
+    genuinely needed the fixpoint to re-resolve every class's own bases
+    itself, since `python.inheritance` alone cannot see past a
+    locally-assigned `Base` variable at any depth (caught by
+    `test_a_multi_level_base_hierarchy_still_resolves` during development,
+    not by inspection). A class is only a table if its own body declares
+    `__tablename__`; an intermediate abstract base/mixin is correctly never
+    classified as one.
+  - **The design question resolved carefully, as asked**: ORM class vs.
+    database entity. Every other enricher here tags an existing Python
+    entity in place, because the framework construct *is* that Python
+    construct. An ORM class and its table are not — one is source
+    structure, the other a runtime/data structure with independent
+    identity. So this is the one place a framework enricher mints a
+    *second*, linked entity: the class stays tagged
+    (`metadata.framework`/`sqlalchemy_kind`, the same rule as everywhere
+    else), and a fresh `EntityType.DATA_ENTITY` is minted for the table.
+  - **Two new relationships, added only after checking the existing
+    vocabulary honestly didn't cover them** (`docs/IR.md`'s entry on this
+    milestone has the full reasoning): `RelationshipType.MAPS_TO` (class →
+    table — not `EXTENDS`/`IMPLEMENTS`, which are code-structural, and not
+    `RELATED_TO`, which is too vague for an impact query to use) and
+    `RelationshipType.REFERENCES` (a foreign key between two columns — a
+    relational-database fact independent of any one adapter, distinct from
+    `DEPENDS_ON`, which already spans build-time imports and runtime
+    dependency injection). Columns are `CONTAINS`-related to their table,
+    matching Django's model-field pattern; `ForeignKey("table.column")`
+    resolves via direct qualified-name lookup, no extra resolution needed
+    since a column's own qualified name and the FK string share the same
+    format by construction.
+  - **Basic read/write evidence, kept as an independent copy of Django's
+    pattern, not shared** — the milestone's explicit instruction: don't
+    refactor Django's model handling into shared plumbing yet, only once a
+    second adapter's *independent* needs prove what's actually common. What
+    did prove common and got extracted
+    (`adapters/_python_index.py::PythonIndex`/`PythonTreeCache`/`find_class_node`)
+    is pure plumbing over Python's own observations, never data-semantic
+    logic — Django's adapter was refactored to use the shared version too,
+    proven safe by its own full test suite staying green throughout.
+  - **A genuinely new, generic piece of infrastructure, not
+    FastAPI-SQLAlchemy bridge code**: `adapters/_compose.py::compose_normalizers`.
+    `IndexingService` takes exactly one `Normalizer`, but composing two
+    independent enrichers' own `normalize()` naively — each calling
+    Python's normalizer itself, each minting a *different* fresh id for the
+    same underlying Python class — would silently duplicate every plain
+    `CALLS`/`IMPORTS`/`DEFINES` edge Python's own normalizer produces (only
+    caught by writing `test_no_duplicate_relationship_rows_from_composing_two_enrichers`
+    and finding it necessary, not by design review). Fixed by running
+    Python's normalizer exactly once and chaining each enricher's new
+    `enrich_normalized_run` (added alongside each existing `normalize`, now
+    a one-line wrapper) onto the same entity pool. Nothing in `_compose.py`
+    names FastAPI or SQLAlchemy.
+  - **Then plugged, completely unmodified, into the FastAPI fixture**
+    (`tests/fixtures/fastapi_checkout/payments/db_models.py`, new;
+    `payments/services.py` now genuinely reads/writes a SQLAlchemy
+    `Payment.status` instead of a bare local variable) alongside
+    `FastAPIAdapter` in one `IndexingService` run
+    (`tests/integration/test_fastapi_sqlalchemy_together.py`) — one fully
+    connected graph from the HTTP route down to the database column, no
+    bridge code. All previously-passing FastAPI-only and cross-framework
+    tests were re-verified green after the fixture change, not assumed
+    safe.
+  - **Watching, not acting**: Django's and SQLAlchemy's model/field
+    handling now both independently reach for the same shape of concept — a
+    data entity, contained fields, read/write evidence — evidence worth
+    watching for a future shared data-semantic layer, deliberately not
+    acted on now. *Adapters discover abstractions; core should not predict
+    them* — the same principle established for `EntityType.INTERFACE`/
+    `EXPOSES` in the FastAPI milestone, now applied to data semantics.
+  - **Not attempted in this pass**: query-shape analysis, sessions/
+    transactions, async SQLAlchemy, Alembic migrations, raw SQL, hybrid
+    properties, `relationship(...)` construct parsing (deep relationship
+    inference was explicitly out of scope — only a column's direct
+    `ForeignKey(...)` argument is read), and multi-hop `ForeignKey` chains
+    beyond a direct string reference.
 - [ ] Celery async enricher — reads a target Celery app; tasks → `PROCESS`,
       queues → `MESSAGE_CHANNEL`.
-- [ ] **First DataAdapter — most likely SQLAlchemy** (per the explicit
-      sequencing decision after this milestone: having proven cross-framework
-      equivalence with a second `FrameworkAdapter`, the next move is a
-      `DataAdapter`, not a third framework).
 - [ ] Postgres data adapter, from migrations/schema (§21: "do not make vector
       search the source of truth" applies here too — schema facts come from
       migrations, not inference).

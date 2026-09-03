@@ -353,15 +353,125 @@ endpoints (function-based handlers only, matching the milestone's explicit
 scope), and multi-hop router nesting (a router included into another router
 that is itself included into an app composes only one level of prefix).
 
+## SQLAlchemy adapter
+
+`src/hashira/adapters/sqlalchemy/` — the first `DataAdapter` (`ports/adapters.py`),
+a kind distinct from `FrameworkAdapter` on purpose: it must never care
+whether the code it enriches belongs to FastAPI, Django, a CLI, or nothing
+at all. See `adapter.py`'s module docstring for the exact reuse boundary;
+summarized here.
+
+**Detection has to work through two real-world declarative styles**, unlike
+Django's single fixed base class. SQLAlchemy 2.0's class-based root
+(`class Base(DeclarativeBase): pass`) resolves through Python's own
+`python.inheritance` observations, since `DeclarativeBase` is always reached
+by import. The pre-2.0 factory style, still extremely common
+(`Base = declarative_base()`), assigns a plain module-level variable Python's
+extractor never tracks — this adapter finds it itself, the same way
+`adapters.fastapi.adapter` finds `app = FastAPI()`. Both styles feed one
+`known_bases` set, expanded to a fixpoint so a multi-level hierarchy (a
+project's own `TimestampedBase(Base)` mixin) resolves regardless of which
+style introduced its root — the fixpoint has to re-resolve every class's own
+bases itself rather than trusting `python.inheritance` alone, since that data
+cannot see past a locally-assigned `Base` variable at any depth. A class
+extending a known base is only a genuine *model* if its own body declares
+`__tablename__`; `Base` and any mixin without one are correctly never
+classified as tables.
+
+**The one place a framework enricher mints two linked entities instead of
+tagging one.** Every other enricher here tags an existing Python entity in
+place, because the framework construct *is* that Python construct. An ORM
+class and the table it persists to are not: one is source structure, the
+other a runtime/data structure with independent identity. So the model class
+is still tagged (`metadata.framework`/`sqlalchemy_kind`, the same rule as
+everywhere else), *and* a fresh `EntityType.DATA_ENTITY` is minted for the
+table, connected by `RelationshipType.MAPS_TO` — checked against the
+existing relationship vocabulary first and added only once nothing honestly
+fit (`docs/IR.md`'s entry on this milestone has the full reasoning). Columns
+are `EntityType.SYMBOL` entities `CONTAINS`-related to their table
+(mirroring Django's model-field pattern exactly); a `ForeignKey("table.column")`
+argument becomes `RelationshipType.REFERENCES` between two column entities,
+resolved by a direct qualified-name lookup (a column's own qualified name and
+a `ForeignKey` string argument share the same `"table.column"` format by
+construction — no extra resolution step needed).
+
+**Basic read/write evidence, kept as an independent copy of Django's
+pattern, not shared.** `_extract_field_accesses` mirrors Django's
+`LOCAL_INSTANCE`-scoped detection (`payment = Payment()`, then
+`payment.status = ...` / `... payment.status`) line for line — and stays
+that way deliberately. The design discussion this was built from was
+explicit: do not refactor Django's model handling into shared plumbing until
+a second adapter's *independent* needs prove what is actually common. What
+*did* prove common and got extracted (`adapters/_python_index.py`: the
+`PythonIndex`/`PythonTreeCache`/`find_class_node` trio) is purely
+plumbing over Python's own observations — never framework- or data-semantic
+logic. Field-access detection stayed unshared because nothing yet forced the
+question; see "watching for real convergence" below.
+
+**Composing with a `FrameworkAdapter` needed one genuinely new, generic
+piece.** `IndexingService` takes exactly one `Normalizer`, but two enrichers
+(FastAPI + SQLAlchemy) both need to turn their `*.` observations into
+entities on top of Python's. Naively running each enricher's own
+`normalize()` independently and merging the results does not work: every
+`normalize()` calls `adapters.python.normalizer.normalize` itself, and
+`Entity.id` is a fresh ULID every time an `Entity` is constructed — so two
+enrichers would mint *different* ids for the same underlying Python class,
+and downstream relationship reconciliation (which only dedupes against
+storage, not within one run's own candidates) would silently double every
+plain `CALLS`/`IMPORTS`/`DEFINES` edge Python's own normalizer produces.
+`adapters/_compose.py::compose_normalizers` fixes this the same way
+`IndexingService` avoids re-deriving language-level structure per framework
+adapter: run Python's normalizer exactly once, then chain each enricher's
+new `enrich_normalized_run` (added alongside each existing `normalize`,
+which is now a one-line wrapper around it) onto the *same* entity pool.
+Deliberately generic — nothing in `_compose.py` names FastAPI or SQLAlchemy;
+`tests/integration/test_fastapi_sqlalchemy_together.py` is what exercises it
+today, and its own `test_no_duplicate_relationship_rows_from_composing_two_enrichers`
+proves the specific bug this closes.
+
+**Verified end to end, twice.** First against a plain, framework-free
+fixture (`tests/fixtures/sqlalchemy_basic/`,
+`tests/integration/test_sqlalchemy_identity.py`) — proving the adapter means
+the same thing with *no* `FrameworkAdapter` configured at all — answering
+this milestone's own worked example, *"what is affected if `payments.status`
+changes?"*, entirely from the graph. Then the exact same, completely
+unmodified `SQLAlchemyAdapter` is plugged into the FastAPI fixture
+(`tests/fixtures/fastapi_checkout/payments/db_models.py`, added for this
+pass; `payments/services.py` now genuinely reads/writes a SQLAlchemy
+`Payment.status` instead of a bare local variable) alongside `FastAPIAdapter`
+in one `IndexingService` run
+(`tests/integration/test_fastapi_sqlalchemy_together.py`), producing one
+fully-connected graph from the HTTP route down to the database column with
+no FastAPI-SQLAlchemy-specific code anywhere.
+
+**Watching for real convergence, not refactoring speculatively.** Django's
+model/field handling and SQLAlchemy's model/column handling now both exist,
+independently, and both reach for the same shape of concept — a data
+entity, contained fields, read/write evidence. That is exactly the kind of
+signal worth watching (`docs/ROADMAP.md`'s entry on this milestone says
+more), but it is *not* acted on here: Django's adapter was not touched, and
+`_extract_field_accesses` stays duplicated rather than shared. *Adapters
+discover abstractions; core should not predict them* — the same principle
+the FastAPI milestone established for `EntityType.INTERFACE`/`EXPOSES`
+applies here to data semantics too.
+
+**Not attempted in this pass**, documented rather than silently missing:
+query-shape analysis, sessions/transactions, async SQLAlchemy, Alembic
+migrations, raw SQL, hybrid properties, `relationship(...)` construct
+parsing (SQLAlchemy's own ORM-level association helper — "deep relationship
+inference" was explicitly out of scope; only a column's direct
+`ForeignKey(...)` argument is read), and multi-hop `ForeignKey` chains
+beyond a direct string reference.
+
 ## Next adapter target (per the MVP scope decision in ARCHITECTURE.md)
 
-Having proven cross-framework equivalence with a second `FrameworkAdapter`,
-the next milestone is the first `DataAdapter` — most likely SQLAlchemy —
-rather than a third framework. A Celery async enricher (`PROCESS`/
-`MESSAGE_CHANNEL` for async workflows and queues) remains a candidate after
-that. Together these are the remaining pieces needed to produce the §40
-example end to end in one stack; Python + Django/FastAPI already produce
-most of it (see the worked examples above). A second *language* adapter,
-to prove IR portability (§42's "at least two language ecosystems map into
-the same semantic model"), stays a later milestone — proving cross-framework
-equivalence within one language came first, deliberately.
+Having proven cross-framework equivalence with a second `FrameworkAdapter`
+and layered persistence semantics underneath both with a `DataAdapter`, a
+Celery async enricher (`PROCESS`/`MESSAGE_CHANNEL` for async workflows and
+queues) is the next natural candidate — together with SQLAlchemy these are
+the remaining pieces needed to produce the §40 example end to end in one
+stack; Python + Django/FastAPI + SQLAlchemy already produce most of it (see
+the worked examples above). A second *language* adapter, to prove IR
+portability (§42's "at least two language ecosystems map into the same
+semantic model"), stays a later milestone — proving cross-framework and
+cross-layer equivalence within one language came first, deliberately.

@@ -80,12 +80,28 @@ class IdentityClaimKind(StrEnum):
 
 
 class RelationshipType(StrEnum):
-    """Spec §11, plus one addition documented in docs/IR.md.
+    """Spec §11, plus three additions documented in docs/IR.md.
 
     ``SUPERSEDES`` carries identity lineage: when resolution cannot establish
     with sufficient confidence that a renamed or relocated construct is the same
     entity, we mint a new entity and record the lineage rather than silently
     overwriting history (§10).
+
+    ``MAPS_TO`` and ``REFERENCES`` came from the SQLAlchemy `DataAdapter`
+    milestone (`adapters/sqlalchemy/`), where two genuinely new semantic
+    relationships showed up that no existing type honestly covered:
+    ``MAPS_TO`` is a Python class's declarative binding to the physical
+    entity it persists to (``EXTENDS``/``IMPLEMENTS`` are about code
+    structure, not this; ``RELATED_TO`` is too vague to be useful in an
+    impact query) -- unlike a FastAPI handler, an ORM class and its table
+    are not the same conceptual thing, so tagging the class in place (the
+    rule every other framework enricher here follows) would have been
+    dishonest. ``REFERENCES`` is a foreign-key relationship between two
+    columns -- a relational-database fact independent of any one adapter,
+    distinct from ``DEPENDS_ON`` (which already spans build-time import
+    dependencies and runtime dependency injection; folding a third, very
+    different kind of dependency into it would cost precision on every
+    existing query that walks it).
     """
 
     CONTAINS = "CONTAINS"
@@ -114,6 +130,8 @@ class RelationshipType(StrEnum):
     FIXED_BY = "FIXED_BY"
     RELATED_TO = "RELATED_TO"
     SUPERSEDES = "SUPERSEDES"
+    MAPS_TO = "MAPS_TO"
+    REFERENCES = "REFERENCES"
 
 
 class KnowledgeClass(StrEnum):

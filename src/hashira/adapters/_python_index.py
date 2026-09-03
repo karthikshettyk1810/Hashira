@@ -20,7 +20,7 @@ from pathlib import Path
 from ..ports.adapters import ExtractionResult
 from .python.resolve import ResolutionContext
 
-__all__ = ["PythonIndex", "PythonTreeCache"]
+__all__ = ["PythonIndex", "PythonTreeCache", "find_class_node"]
 
 
 class PythonIndex:
@@ -94,3 +94,15 @@ class PythonTreeCache:
             except (SyntaxError, UnicodeDecodeError, OSError):
                 self._cache[file_rel] = None
         return self._cache[file_rel]
+
+
+def find_class_node(tree: ast.Module, simple_name: str) -> ast.ClassDef | None:
+    """The first class definition in `tree` with this simple (unqualified)
+    name -- used once a framework enricher already knows a class's
+    qualified name (from `PythonIndex`) and needs the AST node itself to
+    parse the class body for something Python's own extractor does not
+    track (Django's model fields, SQLAlchemy's columns, ...)."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == simple_name:
+            return node
+    return None

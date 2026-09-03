@@ -3,6 +3,7 @@
 from .adapters import (
     Adapter,
     AdapterCapabilities,
+    DataAdapter,
     ExtractionResult,
     FrameworkAdapter,
     HistoryAdapter,
@@ -26,6 +27,7 @@ from .repositories import (
 __all__ = [
     "Adapter",
     "AdapterCapabilities",
+    "DataAdapter",
     "EmbeddingProvider",
     "EventStore",
     "EvidenceStore",

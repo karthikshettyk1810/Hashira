@@ -8,6 +8,7 @@ guarantee — is this module's entire job.
 ```
 LanguageAdapter.extract()   ->  Observation[] + Evidence[]         (pure, no I/O)
 FrameworkAdapter.enrich()   ->  more Observation[]/Evidence[]      (pure, no I/O)
+DataAdapter.enrich()        ->  more Observation[]/Evidence[]      (pure, no I/O)
 Normalizer (injected)       ->  candidate Entity[]/Relationship[]  (pure)
 identity.resolve()/apply()  ->  MATCHED/SUPERSEDES/NEW/AMBIGUOUS   (pure)
 UnitOfWork                  ->  everything committed as one transaction
@@ -18,18 +19,24 @@ pure CPU work with no reason to hold a database connection. Only identity
 resolution and persistence run inside the `with uow:` block, so a crash
 anywhere in that block leaves the last known-good snapshot exactly as it was.
 
-This service is deliberately ignorant of which *language* or *framework* it
-is indexing: `Normalizer` below is a structural Protocol, not an import of
-`hashira.adapters.python.normalizer.normalize`, and `framework_adapters` is
-just a list of `FrameworkAdapter`s — nothing here hardcodes Python or
-Django. A caller wires a specific combination together (see
-`tests/integration/test_python_indexing.py` for Python alone,
-`tests/integration/test_django_identity.py` for Python + Django); the day a
-second language or framework adapter exists, this file does not change.
-Framework adapters enrich what the language adapters already found — each
-`enrich()` call receives everything extracted so far and returns only its
-own additions (`adapters/django/adapter.py`'s module docstring explains why
-a framework adapter must not re-derive language-level structure).
+This service is deliberately ignorant of which *language*, *framework*, or
+*data layer* it is indexing: `Normalizer` below is a structural Protocol,
+not an import of `hashira.adapters.python.normalizer.normalize`, and
+`framework_adapters`/`data_adapters` are each just a list of `Adapter`s —
+nothing here hardcodes Python, Django, or SQLAlchemy. A caller wires a
+specific combination together (see `tests/integration/test_python_indexing.py`
+for Python alone, `tests/integration/test_django_identity.py` for Python +
+Django, `tests/integration/test_sqlalchemy_identity.py` for Python +
+SQLAlchemy with *no* framework adapter at all); the day a second language,
+framework, or data adapter exists, this file does not change. Framework and
+data adapters both enrich what came before them — each `enrich()` call
+receives everything extracted so far and returns only its own additions
+(`adapters/django/adapter.py`'s module docstring explains why an enricher
+must not re-derive language-level structure). Data adapters run after
+framework adapters, matching the layering `ports/adapters.py::DataAdapter`
+documents, but must not depend on a framework adapter having run at all —
+that independence is the entire point of splitting the two kinds apart
+(see `adapters/sqlalchemy/adapter.py`'s module docstring).
 
 ## A boring re-index is boring again
 
@@ -113,7 +120,13 @@ from ..core.revisions import Revision
 from ..core.schema import IR_VERSION
 from ..core.snapshots import Snapshot, SnapshotStatistics
 from ..identity import GitRename
-from ..ports.adapters import ExtractionResult, FrameworkAdapter, HistoryAdapter, LanguageAdapter
+from ..ports.adapters import (
+    DataAdapter,
+    ExtractionResult,
+    FrameworkAdapter,
+    HistoryAdapter,
+    LanguageAdapter,
+)
 from ..ports.repositories import UnitOfWork
 
 __all__ = ["IndexingResult", "IndexingService", "Normalizer"]
@@ -170,12 +183,14 @@ class IndexingService:
         normalize: Normalizer,
         history_adapters: Sequence[HistoryAdapter] = (),
         framework_adapters: Sequence[FrameworkAdapter] = (),
+        data_adapters: Sequence[DataAdapter] = (),
     ) -> None:
         self._uow_factory = uow_factory
         self._adapters = adapters
         self._normalize = normalize
         self._history_adapters = history_adapters
         self._framework_adapters = framework_adapters
+        self._data_adapters = data_adapters
 
     def index(self, root: Path, *, system_id: SystemID, revision: str | None) -> IndexingResult:
         with self._uow_factory() as uow:
@@ -205,6 +220,20 @@ class IndexingService:
                 observations=list(all_observations), evidence=list(all_evidence)
             )
             addition = framework_adapter.enrich(root, base, system_id=system_id, revision=revision)
+            all_observations.extend(addition.observations)
+            all_evidence.extend(addition.evidence)
+            errors.extend(addition.errors)
+
+        # Data adapters enrich the same running result, after framework
+        # adapters -- but must not depend on one having run. A DataAdapter's
+        # whole point is to mean the same thing whether or not any
+        # framework adapter is even configured (see ports/adapters.py's
+        # `DataAdapter` docstring).
+        for data_adapter in self._data_adapters:
+            base = ExtractionResult(
+                observations=list(all_observations), evidence=list(all_evidence)
+            )
+            addition = data_adapter.enrich(root, base, system_id=system_id, revision=revision)
             all_observations.extend(addition.observations)
             all_evidence.extend(addition.evidence)
             errors.extend(addition.errors)

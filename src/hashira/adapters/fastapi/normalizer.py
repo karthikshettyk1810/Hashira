@@ -55,13 +55,30 @@ from .._identity_claims import declaration_anchor_claim, qualified_name_claim
 from ..python.normalizer import NormalizedRun
 from ..python.normalizer import normalize as normalize_python
 
-__all__ = ["normalize"]
+__all__ = ["enrich_normalized_run", "normalize"]
 
 
 def normalize(
     observations: Sequence[Observation], *, system_id: SystemID, revision: str | None
 ) -> NormalizedRun:
     python_run = normalize_python(observations, system_id=system_id, revision=revision)
+    return enrich_normalized_run(python_run, observations, system_id=system_id, revision=revision)
+
+
+def enrich_normalized_run(
+    python_run: NormalizedRun,
+    observations: Sequence[Observation],
+    *,
+    system_id: SystemID,
+    revision: str | None,
+) -> NormalizedRun:
+    """`normalize`'s actual logic, taking an already-computed Python-level
+    `NormalizedRun` instead of deriving one itself -- what a generic
+    multi-enricher composer (`adapters._compose.compose_normalizers`) calls
+    directly, so two enrichers can layer onto *one* shared entity pool
+    instead of each re-deriving (and re-minting fresh ids for) the same
+    underlying Python constructs. Not part of the `Normalizer` protocol
+    itself; `normalize` above is what satisfies that."""
     by_qn: dict[str, Entity] = {
         e.qualified_name: e for e in python_run.entities if e.qualified_name
     }

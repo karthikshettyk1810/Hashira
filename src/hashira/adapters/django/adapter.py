@@ -46,7 +46,7 @@ from ...core.enums import Origin
 from ...core.evidence import Evidence, Observation
 from ...core.ids import SystemID
 from ...ports.adapters import AdapterCapabilities, ExtractionResult
-from .._python_index import PythonIndex, PythonTreeCache
+from .._python_index import PythonIndex, PythonTreeCache, find_class_node
 from ..python.resolve import ResolutionContext, resolve_expr
 from .known_bases import MODEL_BASES, MODEL_FIELD_MODULE_PREFIX, VIEW_BASES
 
@@ -137,7 +137,7 @@ class DjangoAdapter:
             if tree is None:
                 result.errors.append(f"{file_rel}: could not parse for field detection")
                 continue
-            class_node = _find_class(tree, class_qn.rsplit(".", 1)[-1])
+            class_node = find_class_node(tree, class_qn.rsplit(".", 1)[-1])
             if class_node is None:
                 continue
             ctx = index.context_for(module_qn)
@@ -206,13 +206,6 @@ class DjangoAdapter:
                     )
 
         return result
-
-
-def _find_class(tree: ast.Module, simple_name: str) -> ast.ClassDef | None:
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name == simple_name:
-            return node
-    return None
 
 
 def _extract_model_fields(

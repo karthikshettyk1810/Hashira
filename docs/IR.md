@@ -126,6 +126,40 @@ a *new* entity and record the lineage — not to guess and merge. `SUPERSEDES`
 is that lineage edge. `EntityStatus.SUPERSEDED` and
 `EventType.ENTITY_IDENTITY_MERGED` exist for the same reason.
 
+### `MAPS_TO` and `REFERENCES` added to the relationship vocabulary
+
+The SQLAlchemy `DataAdapter` milestone (`adapters/sqlalchemy/`) surfaced two
+more genuinely new relationships — checked against the existing 26 first,
+per the design discussion this was built from ("don't add a new relationship
+casually; first check whether an existing one honestly carries the
+semantics"). Neither did:
+
+* `MAPS_TO` — an ORM class's declarative binding to the table it persists
+  to. `EXTENDS`/`IMPLEMENTS` are about code structure, not this;
+  `RELATED_TO` exists precisely to be non-committal, which would discard
+  the one thing an impact query actually needs ("what code paths touch the
+  `payments` table" has to walk `MAPS_TO` specifically). Unlike every other
+  framework construct this codebase enriches (a Django view, a FastAPI
+  handler — always tagged onto the existing Python entity, never
+  duplicated), an ORM class and its table are not the same conceptual
+  thing: one is source structure, the other is a runtime/data structure
+  with independent identity (a schema migration can add a column no Python
+  attribute mirrors yet). That is why this is the one place in the codebase
+  a framework enricher mints a *second*, linked entity instead of tagging
+  the first.
+* `REFERENCES` — a foreign-key relationship between two columns. A
+  relational-database fact independent of any one adapter (SQLAlchemy,
+  Django ORM, and a raw-SQL/migrations adapter would all want to report the
+  same kind of edge), and distinct from `DEPENDS_ON`, which already spans
+  build-time import dependencies and runtime dependency injection
+  (`adapters/fastapi/`'s `Depends()` handling) — folding a third, very
+  different kind of dependency into it would cost precision on every
+  existing query that already walks it.
+
+Both are in `IMPACT_EDGES` (`core/relationships.py`): a table's or column's
+identity is exactly the kind of fact an impact query should be able to
+reach through, not structural noise like `CONTAINS`/`DEFINES`.
+
 ### `KnowledgeClass` has four members, not three
 
 §12's prose introduces "three primary knowledge classes" and then lists four

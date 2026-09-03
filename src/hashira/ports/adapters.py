@@ -100,6 +100,30 @@ class FrameworkAdapter(Adapter, Protocol):
 
 
 @runtime_checkable
+class DataAdapter(Adapter, Protocol):
+    """Persistence semantics -- table/column identity, foreign keys, basic
+    read/write evidence -- e.g. an ORM's declarative models (§18).
+
+    Structurally identical to `FrameworkAdapter` (an `enrich()` over
+    whatever language/framework extraction already produced), but a
+    distinct kind on purpose: a `DataAdapter` must not care which, if any,
+    `FrameworkAdapter` produced the code it is enriching. SQLAlchemy models
+    mean the same thing whether the consuming application is FastAPI,
+    Django, a CLI, or nothing at all -- `IndexingService` runs data adapters
+    after framework adapters (mirroring the layering diagram this port was
+    designed from), but nothing here may read a framework-specific
+    observation kind to do its own job.
+    """
+
+    def enrich(
+        self, root: Path, base: ExtractionResult, *, system_id: str, revision: str | None
+    ) -> ExtractionResult:
+        """Add persistence meaning on top of whatever extraction has
+        produced so far."""
+        ...
+
+
+@runtime_checkable
 class InfrastructureAdapter(Adapter, Protocol):
     """Docker, Kubernetes, Terraform and friends (§18)."""
 

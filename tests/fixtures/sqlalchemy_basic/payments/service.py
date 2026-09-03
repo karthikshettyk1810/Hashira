@@ -1,4 +1,5 @@
-from .db_models import Payment
+from .models import Payment
+from .repository import PaymentRepository
 
 
 class PaymentService:
@@ -7,4 +8,6 @@ class PaymentService:
         payment.status = "pending"
         if payment.status == "pending":
             payment.status = "captured"
+        repo = PaymentRepository()
+        repo.save(payment)
         return payment.status
