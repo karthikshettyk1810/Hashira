@@ -289,8 +289,84 @@ core rather than the adapter.
     `find_entities(revision=...)` itself (still `NotImplementedError` on
     both backends — reserved for when this needs to run faster than "load
     the whole graph and filter it in Python"), and the FastAPI adapter.
+- [x] **FastAPI framework enricher** (`src/hashira/adapters/fastapi/`) — not
+      built to add feature count, but as an architectural test: can two
+      materially different frameworks produce equivalent concepts in the
+      same System IR without contaminating core or the Python adapter?
+  - **Same reuse discipline as Django, applied to a different idiom.**
+    Django keys off resolved inheritance; FastAPI has no base-class
+    vocabulary to key off, so this adapter resolves *decorators and call
+    expressions* instead (`@app.get(...)`, `Depends(...)`,
+    `include_router(...)`) — through the same `resolve_expr` mechanism,
+    against the same kind of curated, fully-qualified allowlist
+    (`known_symbols.py`, Django's `known_bases.py` for a different surface).
+    A variable named `app` that is not actually `FastAPI()` is not detected,
+    matching Django's own "a class named `PaymentModel` proves nothing by
+    its name" discipline.
+  - **`adapters/_python_index.py` came out of proving this** — Django's own
+    `_Index`/`_TreeCache`, extracted once a second framework adapter needed
+    exactly the same plumbing over Python's observations, joining
+    `_dedup.py`/`_identity_claims.py` as shared infrastructure two
+    independent adapters actually needed, not infrastructure designed in
+    advance of being needed. Route/handler/dependency *semantics* stayed
+    completely separate per adapter — see the design-question bullet below.
+  - Supports: `FastAPI()`/`APIRouter()` recognition, `@app.*`/`@router.*`
+    route registration, `include_router(..., prefix=...)` (one hop of
+    prefix composition — documented, not attempted deeper),
+    `Depends(...)` as its own `DEPENDS_ON` edge — deliberately *not* folded
+    into `CALLS` just because the syntax contains a call expression — and
+    basic request/response model association (a parameter/return annotation
+    resolving to a class Python's own `python.inheritance` observations
+    confirm extends `pydantic.BaseModel`).
+  - **A route handler is tagged, not duplicated**, the exact rule proven for
+    Django's models/views: it stays `EntityType.SYMBOL` with
+    `metadata.framework`/`fastapi_kind` set. A route gets a freshly minted
+    `INTERFACE` entity (`EXPOSES`-linked to the handler), since a route has
+    independent system meaning no Python symbol carries.
+  - **Request/response model association deliberately stays out of the
+    graph as an edge type.** Neither `CONSUMES`/`PRODUCES` (already
+    reserved for message-queue direction — see `docs/ARCHITECTURE.md`'s
+    Celery example) nor `DEPENDS_ON` (reserved for `Depends()`) fit, and
+    inventing a new relationship type for two adapters' first pass at this
+    would have been exactly the premature taxonomy this milestone was
+    explicitly warned against. Recorded as metadata on the handler entity
+    instead.
+  - **The design question this milestone was built to surface**: Django and
+    FastAPI now independently reach for the same shape of concept — HTTP
+    method, route, handler — and both independently minted
+    `EntityType.INTERFACE` + `EXPOSES` for it, with neither adapter
+    importing from the other. That is evidence a framework-neutral "route"
+    concept might eventually deserve a typed core representation. **Not
+    promoted yet** — two adapters converging once is a signal worth
+    watching, not proof. *Adapters discover abstractions; core should not
+    predict them.*
+  - **The real definition of done**
+    (`tests/integration/test_cross_framework_equivalence.py`), not "the
+    fixture indexes successfully": two independently-indexed, semantically
+    equivalent applications (`tests/fixtures/django_basic/`, reused as-is
+    since it already matched the target shape;
+    `tests/fixtures/fastapi_checkout/`, new) are asked the *same* question —
+    "what is affected if `PaymentService.process` changes?" — by *one*
+    `reverse_impact` function that imports nothing from either adapter
+    package. Both traversals reach something playing "the handler that
+    receives the request" and something playing "the test that verifies the
+    behavior." The exact impact sets are not asserted equal on purpose —
+    Django's chain has an intervening view class FastAPI's plain function
+    handler does not, so FastAPI's route ends up reachable in the same
+    unbroken traversal while Django's needs a documented extra hop — a real,
+    expected architectural difference, not a discrepancy to paper over.
+  - **Not attempted in this pass**: SQLAlchemy or any persistence layer (a
+    `DataAdapter`'s job, not a framework enricher's — see below),
+    field-level access on Pydantic models (no FastAPI/Pydantic equivalent of
+    Django's `_extract_field_accesses` — association is handler-to-model,
+    not model-field-to-handler), class-based endpoints (function handlers
+    only), and multi-hop router nesting.
 - [ ] Celery async enricher — reads a target Celery app; tasks → `PROCESS`,
       queues → `MESSAGE_CHANNEL`.
+- [ ] **First DataAdapter — most likely SQLAlchemy** (per the explicit
+      sequencing decision after this milestone: having proven cross-framework
+      equivalence with a second `FrameworkAdapter`, the next move is a
+      `DataAdapter`, not a third framework).
 - [ ] Postgres data adapter, from migrations/schema (§21: "do not make vector
       search the source of truth" applies here too — schema facts come from
       migrations, not inference).

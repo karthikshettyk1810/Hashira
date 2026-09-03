@@ -46,6 +46,7 @@ from ...core.enums import Origin
 from ...core.evidence import Evidence, Observation
 from ...core.ids import SystemID
 from ...ports.adapters import AdapterCapabilities, ExtractionResult
+from .._python_index import PythonIndex, PythonTreeCache
 from ..python.resolve import ResolutionContext, resolve_expr
 from .known_bases import MODEL_BASES, MODEL_FIELD_MODULE_PREFIX, VIEW_BASES
 
@@ -84,7 +85,7 @@ class DjangoAdapter:
         targeted parsing. The caller merges this into the run; `base`'s own
         content is not echoed back."""
         now = datetime.now(UTC)
-        index = _Index.build(base)
+        index = PythonIndex.build(base)
         result = ExtractionResult()
 
         detected_models: dict[str, str] = {}  # class_qn -> module_qn
@@ -125,7 +126,7 @@ class DjangoAdapter:
                         )
                     )
 
-        trees = _TreeCache(root)
+        trees = PythonTreeCache(root)
 
         fields_by_model: dict[str, dict[str, str]] = {}
         for class_qn, module_qn in detected_models.items():
@@ -205,74 +206,6 @@ class DjangoAdapter:
                     )
 
         return result
-
-
-class _Index:
-    """Everything this adapter needs from Python's own observations, indexed
-    once. Built entirely from `base.observations` — no re-parsing here."""
-
-    def __init__(self) -> None:
-        self.imports: dict[str, dict[str, str]] = {}
-        self.module_locals: dict[str, set[str]] = {}
-        self.inheritance: dict[str, list[str]] = {}
-        self.symbol_file: dict[str, str] = {}
-        self.module_file: dict[str, str] = {}
-        self.class_module: dict[str, str] = {}
-
-    @classmethod
-    def build(cls, base: ExtractionResult) -> _Index:
-        index = cls()
-        for obs in base.observations:
-            if obs.kind == "python.import":
-                module_qn = str(obs.payload["importer_qualified_name"])
-                index.imports.setdefault(module_qn, {})[str(obs.payload["bound_name"])] = str(
-                    obs.payload["target"]
-                )
-            elif obs.kind == "python.module":
-                qn = str(obs.payload["qualified_name"])
-                index.module_file[qn] = str(obs.payload["file"])
-            elif obs.kind == "python.symbol":
-                qn = str(obs.payload["qualified_name"])
-                index.symbol_file[qn] = str(obs.payload["file"])
-                if obs.payload["kind"] == "class":
-                    index.module_locals.setdefault(
-                        str(obs.payload["module_qualified_name"]), set()
-                    ).add(str(obs.payload["name"]))
-                    index.class_module[qn] = str(obs.payload["module_qualified_name"])
-                elif obs.payload["parent_kind"] == "module":
-                    index.module_locals.setdefault(
-                        str(obs.payload["module_qualified_name"]), set()
-                    ).add(str(obs.payload["name"]))
-            elif obs.kind == "python.inheritance":
-                resolved = obs.payload.get("resolved_qualified_name")
-                if resolved:
-                    index.inheritance.setdefault(
-                        str(obs.payload["class_qualified_name"]), []
-                    ).append(str(resolved))
-        return index
-
-    def context_for(self, module_qn: str) -> ResolutionContext:
-        return ResolutionContext(
-            module_qualified_name=module_qn,
-            imports=self.imports.get(module_qn, {}),
-            module_locals=self.module_locals.get(module_qn, set()),
-        )
-
-
-class _TreeCache:
-    def __init__(self, root: Path) -> None:
-        self._root = root
-        self._cache: dict[str, ast.Module | None] = {}
-
-    def get(self, file_rel: str) -> ast.Module | None:
-        if file_rel not in self._cache:
-            try:
-                self._cache[file_rel] = ast.parse(
-                    (self._root / file_rel).read_text(encoding="utf-8")
-                )
-            except (SyntaxError, UnicodeDecodeError, OSError):
-                self._cache[file_rel] = None
-        return self._cache[file_rel]
 
 
 def _find_class(tree: ast.Module, simple_name: str) -> ast.ClassDef | None:
