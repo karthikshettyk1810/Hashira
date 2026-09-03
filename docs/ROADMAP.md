@@ -595,10 +595,107 @@ core rather than the adapter.
 
 ## Phase 4 — Agent integration
 
-- [ ] MCP tools per §27: `system.explain`, `system.impact`, `system.trace`,
-      `system.dependencies`, `system.history`, `system.incidents`,
-      `system.architecture`, `system.search`.
-- [ ] `hashira mcp` / `hashira agent` CLI commands.
+- [x] **MCP read surface v0.1** (`src/hashira/mcp/`) — the first thing an
+      external agent can talk to, deliberately "very small and read-only":
+      a transport layer over capabilities Hashira already proves
+      internally, not a new source of intelligence.
+  - **One architecture rule, enforced structurally**: `Agent -> MCP ->
+    Application services -> System IR/Storage/History`, never the reverse
+    and never a shortcut across it — `mcp/server.py` imports only from
+    `hashira.application`, never `ports.repositories.UnitOfWork`'s
+    sub-ports, storage, or adapter internals directly. Two new, otherwise
+    unnecessary `application/` modules (`graph.py`'s `get_entity`/
+    `get_relationships`/`get_entity_at_revision`, `search.py`'s
+    `search_entities`) exist purely so MCP has a proper intermediary to
+    call even for a one-line id lookup — convenience was traded for
+    honoring the diagram literally.
+  - **Seven tools, IDs first**: `get_entity`, `get_relationships`,
+    `query_at_revision`, `reverse_impact`, `forward_impact`,
+    `follow_lineage`, and `search_entities` — the one name-based tool,
+    exact/substring text matching only, explicitly "discovery, not
+    identity" (no fuzzy ranking, no embeddings). Every other tool takes an
+    opaque entity id; the canonical agent flow chains them exactly as
+    specified: `search_entities` → id → `reverse_impact`/`forward_impact`
+    → `get_entity`/`get_relationships` → `query_at_revision` →
+    `follow_lineage`.
+  - **`follow_lineage`** (`application/impact.py`) is new: walks
+    `SUPERSEDES` edges in both directions from one entity, stopping (never
+    guessing) at a fork — more than one predecessor or successor candidate
+    — since choosing a branch would be exactly the kind of invented
+    certainty this project refuses elsewhere. `query_at_revision`'s MCP
+    tool deliberately does *not* return the module's own `HistoricalGraph`
+    (the whole graph at a revision) but composes `get_entity_at_revision` +
+    `get_relationships(revision=...)`, scoped to one entity's neighborhood
+    — the historical primitive, without becoming the "give me the entire
+    graph" endpoint explicitly kept out of scope.
+  - **Losslessness is the non-negotiable requirement, not an aspiration.**
+    `mcp/serialize.py` reuses each `core` IR record's own proven JSON form
+    (`IRModel.model_dump(mode="json")`) rather than hand-picking fields — a
+    `Relationship` crossing the MCP boundary still carries its
+    `knowledge_class`, `confidence`, `origin`, `evidence_ids`, and
+    `valid_from_revision`/`valid_until_revision`. `reverse_impact`/
+    `forward_impact` return every path and every hop, never collapsed to a
+    flat list of names; no prose, no ranking, no summarization happens
+    inside Hashira at all — the marquee test below asserts real `Evidence`
+    records (with `locator`/`source`) survive serialization on every
+    traversed hop, not just that a relationship type string came through.
+  - **A real, honest asymmetry this surfaced, not papered over**: a
+    `SUPERSEDES` relationship the identity resolver mints
+    (`identity/resolver.py`) carries `confidence` and a `metadata.rationale`
+    string but no `evidence_ids` — unlike a `CALLS`/`WRITES` edge from
+    static analysis, lineage evidence lives on the *entity's own*
+    `identity_claims` (e.g. `DECLARATION_LINEAGE`), not as attached
+    `Evidence` rows on the edge. `follow_lineage`'s MCP tool still returns
+    both — the relationship's rationale and the successor entity's full
+    claim list — so an agent can see *why* Hashira believes a lineage edge
+    is real even though `LineageHop.evidence` itself is empty for this
+    case; asserted explicitly in the marquee test rather than assumed.
+  - **The marquee integration test**
+    (`tests/integration/test_mcp_read_surface.py`) makes a real MCP
+    protocol call — `mcp.client._memory.InMemoryTransport` +
+    `mcp.ClientSession`, no subprocess, no external client "to keep
+    unrelated variables out" — against `build_server()` wired to the same
+    combined FastAPI + SQLAlchemy + Git fixture every framework/temporal/
+    identity milestone before this one already proved out: search
+    "Payment" → find `payments.status` → `reverse_impact` → service →
+    route handler → route, with every hop's evidence intact; then, after a
+    declaration-level rename commit (`payments.status` → `payments.state`,
+    the exact fixture from Identity Resolution v0.2), the *old* entity id
+    → `follow_lineage` → the new entity id → `reverse_impact` at the later
+    revision, still correctly empty until the service catches up, and
+    still resolvable by the original id via `resolved_from`. Proves an
+    external agent can discover a system concept, inspect why Hashira
+    believes it exists, understand its impact, travel through history, and
+    continue reasoning about the evolved concept — without knowing
+    anything about Django, FastAPI, SQLAlchemy, Git internals, SQLite, or
+    Hashira's own Python implementation.
+  - **`hashira mcp --db <path> --system <slug>`** (`cli/main.py`) makes the
+    already-declared `[project.scripts] hashira` entry point real for the
+    first time — plain `argparse`, one subcommand, running the built
+    server over stdio (`MCPServer.run(transport="stdio")`). Surfaced a
+    latent, pre-existing mypy gap: `ports.repositories.UnitOfWork`'s
+    mutable Protocol attributes make no concrete backend (`SqliteUnitOfWork`,
+    `MemoryUnitOfWork`) a *structural* subtype of it under strict invariant
+    matching, even though every method callers actually use is satisfied —
+    invisible until this CLI became the first `src/hashira`-scoped (mypy-
+    checked) call site to bind a concrete `Database.unit_of_work` to a
+    `Callable[[], UnitOfWork]` parameter; every earlier caller lived in
+    `tests/`, outside mypy's `files` scope. Documented with one explicit,
+    narrowly-scoped `cast` rather than weakening the protocol.
+  - **Explicitly out of scope for v0.1, per the milestone's own
+    instruction**: mutation tools, `apply_change`, code editing, shell
+    execution, Git commits, agent-triggered indexing, an LLM provider
+    inside Hashira, authentication/remote multi-tenancy, a hosted server,
+    WebSocket transport, and a "give me the entire graph" endpoint. Local
+    stdio, one system bound at `build_server()` construction, is
+    deliberately the whole surface.
+  - **Not attempted in this pass**: the optional seventh-tool question was
+    already settled the other way — `search_entities` shipped as part of
+    the seven, not held back, since manual testing needed it immediately;
+    a real external MCP client (Claude Desktop, Codex) exercising this
+    server is the user's own explicitly stated next step, deliberately
+    *not* started here to keep this milestone's own definition of done
+    free of client-specific variables.
 
 ## Phase 5 — Runtime intelligence
 
@@ -651,8 +748,11 @@ Gates Phase 7. Copied here so it stays visible against the phase list above:
       confirmed by running the identical Python-adapter pipeline against both
       `SqliteDatabase` and `MemoryDatabase` with zero adapter-side changes.
 - [ ] The same is true of a PostgreSQL implementation, once it exists.
-- [ ] CLI and JSON APIs can query the same domain services.
-- [ ] MCP can expose read-only intelligence without modifying core.
+- [ ] CLI and JSON APIs can query the same domain services (`hashira mcp`
+      exists; a general query CLI/JSON API does not yet).
+- [x] MCP can expose read-only intelligence without modifying core — MCP
+      read surface v0.1 (`src/hashira/mcp/`), calling only
+      `hashira.application.*`.
 - [x] Tests cover identity, temporal, provenance and graph invariants
       (`tests/unit/`, `tests/contract/`, `tests/integration/`) — 204 tests as
       of the Python adapter landing, including the adversarial identity suite

@@ -1,1 +1,1 @@
-"""Placeholder package; implemented in a later phase."""
+"""The `hashira` command. See `main.py` for the one subcommand it has today."""

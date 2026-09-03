@@ -14,9 +14,14 @@ Spec references are to `Hashira_System_Design_Specification_v0.1.pdf`.
 8. **Verification** *(future)* — tests, policy, regression, runtime validation.
 9. **Feedback** *(future)* — verified outcomes feed back into system history.
 
-This repository currently implements layers 2–3 as **contracts only**: the
-domain models in `src/hashira/core/` and the ports in `src/hashira/ports/`.
-Nothing above or below them exists yet — see [ROADMAP.md](ROADMAP.md).
+This repository has grown well past layers 2–3 as contracts only — see
+[ROADMAP.md](ROADMAP.md) for what is actually built and tested today.
+Notably, layer 6 now has a real, if intentionally narrow, foothold:
+`src/hashira/mcp/` is a read-only MCP server over `application/` (never
+storage or adapters directly — see its own module docstrings), and
+`hashira mcp --db <path> --system <slug>` (`src/hashira/cli/main.py`) runs
+it over stdio. It is one `argparse` subcommand, not the Typer-based CLI
+described below — that lands once §28's fuller command set is built.
 
 ## Dependency direction
 

@@ -10,6 +10,7 @@ import pytest
 from hashira.application.history import query_at_revision
 from hashira.application.impact import (
     ImpactAnalyzer,
+    follow_lineage,
     forward_impact,
     resolve_identity,
     reverse_impact,
@@ -20,6 +21,8 @@ from hashira.core import (
     EntityStatus,
     EntityType,
     Evidence,
+    IdentityClaim,
+    IdentityClaimKind,
     KnowledgeClass,
     Origin,
     Relationship,
@@ -46,6 +49,41 @@ def system(db: MemoryDatabase) -> System:
 
 def _entity(system: System, name: str, *, type: EntityType = EntityType.SYMBOL) -> Entity:
     return Entity(system_id=system.id, type=type, name=name, qualified_name=name)
+
+
+def _superseded_entity(system: System, name: str) -> Entity:
+    """A SUPERSEDED entity must carry the identity claims that justified it
+    (§10's own model validator) -- this helper exists purely so lineage
+    tests don't have to repeat that boilerplate."""
+    return Entity(
+        system_id=system.id,
+        type=EntityType.SYMBOL,
+        name=name,
+        qualified_name=name,
+        status=EntityStatus.SUPERSEDED,
+        identity_claims=[
+            IdentityClaim(
+                kind=IdentityClaimKind.GIT_RENAME,
+                value=f"rename::{name}",
+                origin=Origin.GIT,
+                confidence=Confidence.CERTAIN,
+            )
+        ],
+    )
+
+
+def _supersedes(
+    system: System, successor: Entity, predecessor: Entity, *, evidence: Evidence | None = None
+) -> Relationship:
+    return Relationship(
+        system_id=system.id,
+        source_entity_id=successor.id,
+        target_entity_id=predecessor.id,
+        type=RelationshipType.SUPERSEDES,
+        origin=Origin.DERIVED,
+        knowledge_class=KnowledgeClass.DERIVATION,
+        evidence_ids=[evidence.id] if evidence else [],
+    )
 
 
 def _evidence(system: System) -> Evidence:
@@ -417,3 +455,120 @@ def test_impact_analyzer_delegates_to_the_module_functions(
 
     assert {e.id for e in reverse.affected_entities} == {a.id}
     assert {e.id for e in forward.affected_entities} == {b.id}
+
+
+# --- follow_lineage ----------------------------------------------------------
+
+
+def test_follow_lineage_walks_both_directions_of_a_chain(
+    db: MemoryDatabase, system: System
+) -> None:
+    """a -> (renamed to) -> b -> (renamed to) -> c, asked about the middle
+    generation: one predecessor, one successor, each with its own edge and
+    evidence."""
+    a = _superseded_entity(system, "a")
+    b = _superseded_entity(system, "b")
+    c = _entity(system, "c")
+    ev_ab = _evidence(system)
+    ev_bc = _evidence(system)
+    _seed(
+        db,
+        system,
+        [a, b, c],
+        [_supersedes(system, b, a, evidence=ev_ab), _supersedes(system, c, b, evidence=ev_bc)],
+        [ev_ab, ev_bc],
+    )
+
+    with db.unit_of_work() as uow:
+        result = follow_lineage(uow, system_id=system.id, entity_id=b.id)
+
+    assert result.start.id == b.id
+    assert len(result.predecessors) == 1
+    assert result.predecessors[0].predecessor.id == a.id
+    assert result.predecessors[0].successor.id == b.id
+    assert [e.id for e in result.predecessors[0].evidence] == [ev_ab.id]
+
+    assert len(result.successors) == 1
+    assert result.successors[0].predecessor.id == b.id
+    assert result.successors[0].successor.id == c.id
+    assert [e.id for e in result.successors[0].evidence] == [ev_bc.id]
+
+
+def test_follow_lineage_from_the_oldest_generation_has_no_predecessors(
+    db: MemoryDatabase, system: System
+) -> None:
+    a = _superseded_entity(system, "a")
+    b = _entity(system, "b")
+    _seed(db, system, [a, b], [_supersedes(system, b, a)])
+
+    with db.unit_of_work() as uow:
+        result = follow_lineage(uow, system_id=system.id, entity_id=a.id)
+
+    assert result.predecessors == ()
+    assert len(result.successors) == 1
+    assert result.successors[0].successor.id == b.id
+
+
+def test_follow_lineage_from_the_newest_generation_has_no_successors(
+    db: MemoryDatabase, system: System
+) -> None:
+    a = _superseded_entity(system, "a")
+    b = _entity(system, "b")
+    _seed(db, system, [a, b], [_supersedes(system, b, a)])
+
+    with db.unit_of_work() as uow:
+        result = follow_lineage(uow, system_id=system.id, entity_id=b.id)
+
+    assert result.successors == ()
+    assert len(result.predecessors) == 1
+    assert result.predecessors[0].predecessor.id == a.id
+
+
+def test_follow_lineage_with_no_lineage_at_all_returns_empty_both_ways(
+    db: MemoryDatabase, system: System
+) -> None:
+    a = _entity(system, "a")
+    _seed(db, system, [a], [])
+
+    with db.unit_of_work() as uow:
+        result = follow_lineage(uow, system_id=system.id, entity_id=a.id)
+
+    assert result.start.id == a.id
+    assert result.predecessors == ()
+    assert result.successors == ()
+
+
+def test_follow_lineage_stops_at_a_fork_rather_than_guessing(
+    db: MemoryDatabase, system: System
+) -> None:
+    """Two entities both claim to supersede the same predecessor -- which
+    one is the "real" lineage is genuinely ambiguous, so the walk in that
+    direction stops rather than picking one, the same "do not guess"
+    discipline `identity.resolve` applies to a tied resolution decision."""
+    a = _superseded_entity(system, "a")
+    b = _entity(system, "b")
+    c = _entity(system, "c")
+    _seed(db, system, [a, b, c], [_supersedes(system, b, a), _supersedes(system, c, a)])
+
+    with db.unit_of_work() as uow:
+        result = follow_lineage(uow, system_id=system.id, entity_id=a.id)
+
+    assert result.successors == ()
+
+
+def test_follow_lineage_unknown_entity_raises(db: MemoryDatabase, system: System) -> None:
+    with db.unit_of_work() as uow, pytest.raises(KeyError):
+        follow_lineage(uow, system_id=system.id, entity_id="ent_nonexistent")
+
+
+def test_impact_analyzer_delegates_follow_lineage_too(db: MemoryDatabase, system: System) -> None:
+    a = _superseded_entity(system, "a")
+    b = _entity(system, "b")
+    _seed(db, system, [a, b], [_supersedes(system, b, a)])
+
+    with db.unit_of_work() as uow:
+        analyzer = ImpactAnalyzer(uow=uow, system_id=system.id)
+        result = analyzer.follow_lineage(b.id)
+
+    assert len(result.predecessors) == 1
+    assert result.predecessors[0].predecessor.id == a.id

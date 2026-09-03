@@ -81,10 +81,16 @@ __all__ = [
     "ImpactHop",
     "ImpactPath",
     "ImpactResult",
+    "LineageHop",
+    "LineageResult",
+    "follow_lineage",
     "forward_impact",
     "resolve_identity",
     "reverse_impact",
 ]
+
+#: Matches `application.indexing._ALL_ENTITIES_LIMIT`: fixture/demo scale.
+_ALL_ENTITIES_LIMIT = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +186,133 @@ def resolve_identity(graph: HistoricalGraph, entity_id: str) -> Entity | None:
         seen.add(current_id)
         if current_id in present_by_id:
             return present_by_id[current_id]
+
+
+@dataclass(frozen=True, slots=True)
+class LineageHop:
+    """One `SUPERSEDES` edge in a lineage chain: the relationship exactly
+    as stored, plus both entities it connects and whatever evidence backs
+    it. `predecessor`/`successor` name the *conceptual* direction (the
+    older entity, the newer one) regardless of which one `follow_lineage`
+    was asked about -- unlike `ImpactHop`, which deliberately never
+    reinterprets `source`/`target`, lineage only has one honest reading:
+    `successor` is always `relationship.source_entity_id` (`SUPERSEDES`
+    always points new -> old), so naming it plainly here costs nothing."""
+
+    relationship: Relationship
+    predecessor: Entity
+    successor: Entity
+    evidence: tuple[Evidence, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
+class LineageResult:
+    """The full `SUPERSEDES` chain for one entity, in both directions.
+
+    Deliberately not revision-scoped, unlike everything else in this
+    module: lineage is not "what was true at a moment", it is the
+    permanent record of which entities are the same evolving concept.
+    `predecessors[0]` is what `start` most directly superseded (if
+    anything); `successors[0]` is whatever most directly superseded
+    `start` (if anything) -- each list continues transitively, oldest or
+    newest last. v0.1 walks a linear chain (one predecessor, one successor
+    per hop) -- see `follow_lineage`'s own docstring on why a fork is left
+    unresolved rather than guessed at.
+    """
+
+    start: Entity
+    predecessors: tuple[LineageHop, ...]
+    successors: tuple[LineageHop, ...]
+
+
+def follow_lineage(uow: UnitOfWork, *, system_id: SystemID, entity_id: str) -> LineageResult:
+    """Walk `SUPERSEDES` edges in both directions from `entity_id`, across
+    all of history -- "what happened to the thing I was looking at",
+    answered with the actual evidence-backed chain rather than "that
+    entity doesn't exist anymore" (a superseded entity is never deleted,
+    only marked, per §10).
+
+    v0.1 assumes a linear chain: if more than one entity supersedes the
+    same predecessor (or vice versa), the walk in that direction stops
+    rather than picking one arbitrarily -- the same "do not guess" rule
+    `identity.resolve` itself follows for a genuine tie, applied here to
+    lineage traversal instead of a single resolution decision.
+    """
+    all_entities = list(uow.graph.find_entities(system_id, limit=_ALL_ENTITIES_LIMIT))
+    by_id = {e.id: e for e in all_entities}
+    start = by_id.get(entity_id)
+    if start is None:
+        start = uow.graph.get_entity(entity_id)
+        if start is None:
+            raise KeyError(f"{entity_id!r} is not a known entity in system {system_id!r}")
+        by_id[start.id] = start
+
+    superseders: dict[str, list[Relationship]] = defaultdict(list)  # target_id -> edges into it
+    superseded: dict[str, list[Relationship]] = defaultdict(list)  # source_id -> edges out of it
+    for entity in all_entities:
+        for rel in uow.graph.get_relationships(entity.id, direction="out"):
+            if rel.type is not RelationshipType.SUPERSEDES:
+                continue
+            superseders[rel.target_entity_id].append(rel)
+            superseded[rel.source_entity_id].append(rel)
+
+    def walk(
+        current_id: str, edges_by_id: dict[str, list[Relationship]], *, forward: bool
+    ) -> list[LineageHop]:
+        hops: list[LineageHop] = []
+        seen = {current_id}
+        while True:
+            candidates = edges_by_id.get(current_id, [])
+            unseen = [
+                rel
+                for rel in candidates
+                if (rel.source_entity_id if forward else rel.target_entity_id) not in seen
+            ]
+            if len(unseen) != 1:
+                break  # nothing further, or a fork -- do not guess which branch
+            rel = unseen[0]
+            other_id = rel.source_entity_id if forward else rel.target_entity_id
+            other = by_id.get(other_id)
+            if other is None:
+                break
+            predecessor = by_id[current_id] if forward else other
+            successor = other if forward else by_id[current_id]
+            hops.append(LineageHop(relationship=rel, predecessor=predecessor, successor=successor))
+            seen.add(other_id)
+            current_id = other_id
+        return hops
+
+    successor_hops = walk(start.id, superseders, forward=True)
+    predecessor_hops = walk(start.id, superseded, forward=False)
+
+    all_evidence_ids = {
+        eid for hop in (*successor_hops, *predecessor_hops) for eid in hop.relationship.evidence_ids
+    }
+    evidence_by_id = (
+        {ev.id: ev for ev in uow.evidence.get_many(list(all_evidence_ids))}
+        if all_evidence_ids
+        else {}
+    )
+
+    def with_evidence(hop: LineageHop) -> LineageHop:
+        if not hop.relationship.evidence_ids:
+            return hop
+        return LineageHop(
+            relationship=hop.relationship,
+            predecessor=hop.predecessor,
+            successor=hop.successor,
+            evidence=tuple(
+                evidence_by_id[eid]
+                for eid in hop.relationship.evidence_ids
+                if eid in evidence_by_id
+            ),
+        )
+
+    return LineageResult(
+        start=start,
+        predecessors=tuple(with_evidence(h) for h in predecessor_hops),
+        successors=tuple(with_evidence(h) for h in successor_hops),
+    )
 
 
 def reverse_impact(
@@ -359,3 +492,6 @@ class ImpactAnalyzer:
             revision=revision,
             edge_types=edge_types,
         )
+
+    def follow_lineage(self, entity_id: str) -> LineageResult:
+        return follow_lineage(self.uow, system_id=self.system_id, entity_id=entity_id)
