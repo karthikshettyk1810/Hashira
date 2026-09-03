@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from ..core.entities import Entity
 from ..core.enums import EntityType, RelationshipType
+from ..core.events import Event
 from ..core.evidence import Evidence, Observation
 from ..core.relationships import Relationship
 
@@ -49,6 +50,9 @@ class ExtractionResult(BaseModel):
     entities: list[Entity] = Field(default_factory=list)
     relationships: list[Relationship] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
+    events: list[Event] = Field(default_factory=list)
+    """Immutable history facts (§14) this adapter can report directly — a
+    Git adapter's commits, for instance. Most adapters leave this empty."""
     errors: list[str] = Field(default_factory=list)
 
     def extend(self, other: ExtractionResult) -> None:
@@ -56,6 +60,7 @@ class ExtractionResult(BaseModel):
         self.entities.extend(other.entities)
         self.relationships.extend(other.relationships)
         self.evidence.extend(other.evidence)
+        self.events.extend(other.events)
         self.errors.extend(other.errors)
 
 
@@ -99,6 +104,31 @@ class InfrastructureAdapter(Adapter, Protocol):
     """Docker, Kubernetes, Terraform and friends (§18)."""
 
     def extract(self, root: Path, *, system_id: str, revision: str | None) -> ExtractionResult: ...
+
+
+@runtime_checkable
+class HistoryAdapter(Adapter, Protocol):
+    """Git and other version-control systems (§18).
+
+    Reports commits, file changes and rename detections between two
+    revisions — nothing more. It never decides what a detected rename means
+    for entity identity; that decision belongs to `hashira.identity`, fed by
+    the evidence this adapter reports (see `adapters/git/adapter.py`'s
+    module docstring for why that separation is load-bearing here).
+    """
+
+    def extract(
+        self,
+        root: Path,
+        *,
+        system_id: str,
+        since_revision: str | None,
+        until_revision: str | None,
+    ) -> ExtractionResult:
+        """Everything observable between ``since_revision`` (exclusive, or
+        the full history if ``None``) and ``until_revision`` (or the current
+        checkout if ``None``)."""
+        ...
 
 
 @runtime_checkable

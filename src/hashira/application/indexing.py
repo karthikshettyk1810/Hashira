@@ -55,10 +55,23 @@ Two related bugs the adversarial suite caught, now fixed here:
   reconciliation above (they're no longer observed), but the entity itself
   is not — distinguishing "genuinely deleted" from "renamed, pending Git
   evidence" safely needs more than this pass does yet.
-- **A rename is still `NEW` with no lineage**, not `SUPERSEDES` — changing
-  the file or the qualified name changes `DECLARATION_ANCHOR` right along
-  with it, so there is nothing left to match the old entity on. Closing this
-  needs a Git adapter's `GIT_RENAME` evidence (ROADMAP.md), which is next.
+
+## Git rename evidence, now wired in
+
+A `HistoryAdapter` (e.g. `hashira.adapters.git.GitAdapter`) is optional. When
+one is configured, each run asks it what happened between the *last indexed
+revision* (the previous snapshot's, if any) and this one — its commits become
+`Event`s, and any rename it detected above `identity.DEFAULT_MIN_SIMILARITY`
+becomes a `GIT_RENAME` claim on both the old and new entities
+(`identity.attach_rename_evidence`), *before* identity resolution runs. That
+claim sits at corroborating tier (`identity/resolver.py`), so a bare rename
+now resolves as `SUPERSEDES`-with-lineage rather than a disconnected `NEW` —
+still not an outright `MATCHED`, deliberately: a heuristic rename match is
+evidence to weigh, not a fact to trust blindly.
+
+**A rename with no configured history adapter, or one Git's own detection
+doesn't surface, is unchanged**: `NEW` with no lineage, exactly as before —
+this is an addition, not a replacement of the old behavior's safety.
 
 None of this is unsafe — nothing is silently merged, overwritten, or deleted.
 """
@@ -73,12 +86,14 @@ from typing import Protocol
 from .. import identity
 from ..core.entities import Entity
 from ..core.enums import RelationshipType, SnapshotStatus
+from ..core.events import Event
 from ..core.evidence import Evidence, Inference, Observation
 from ..core.ids import SystemID
 from ..core.relationships import Relationship
 from ..core.schema import IR_VERSION
 from ..core.snapshots import Snapshot, SnapshotStatistics
-from ..ports.adapters import LanguageAdapter
+from ..identity import GitRename
+from ..ports.adapters import HistoryAdapter, LanguageAdapter
 from ..ports.repositories import UnitOfWork
 
 __all__ = ["IndexingResult", "IndexingService", "Normalizer"]
@@ -133,14 +148,20 @@ class IndexingService:
         uow_factory: Callable[[], UnitOfWork],
         adapters: Sequence[LanguageAdapter],
         normalize: Normalizer,
+        history_adapters: Sequence[HistoryAdapter] = (),
     ) -> None:
         self._uow_factory = uow_factory
         self._adapters = adapters
         self._normalize = normalize
+        self._history_adapters = history_adapters
 
     def index(self, root: Path, *, system_id: SystemID, revision: str | None) -> IndexingResult:
+        with self._uow_factory() as uow:
+            parent = uow.snapshots.latest_complete(system_id)
+
         all_observations: list[Observation] = []
         all_evidence: list[Evidence] = []
+        all_events: list[Event] = []
         errors: list[str] = []
         files_processed = 0
 
@@ -152,6 +173,20 @@ class IndexingService:
             all_evidence.extend(extraction.evidence)
             errors.extend(extraction.errors)
 
+        renames: list[GitRename] = []
+        for history_adapter in self._history_adapters:
+            history = history_adapter.extract(
+                root,
+                system_id=system_id,
+                since_revision=parent.revision if parent else None,
+                until_revision=revision,
+            )
+            all_observations.extend(history.observations)
+            all_evidence.extend(history.evidence)
+            all_events.extend(history.events)
+            errors.extend(history.errors)
+            renames.extend(_extract_renames(history.observations))
+
         run = self._normalize(all_observations, system_id=system_id, revision=revision)
 
         with self._uow_factory() as uow:
@@ -159,10 +194,13 @@ class IndexingService:
                 uow,
                 system_id=system_id,
                 revision=revision,
+                parent=parent,
                 candidates=run.entities,
                 structural_relationships=run.relationships,
                 observations=all_observations,
                 evidence=all_evidence,
+                events=all_events,
+                renames=renames,
                 unresolved_count=len(run.unresolved),
                 files_processed=files_processed,
                 errors=errors,
@@ -185,15 +223,17 @@ class IndexingService:
         *,
         system_id: SystemID,
         revision: str | None,
+        parent: Snapshot | None,
         candidates: list[Entity],
         structural_relationships: list[Relationship],
         observations: list[Observation],
         evidence: list[Evidence],
+        events: list[Event],
+        renames: list[GitRename],
         unresolved_count: int,
         files_processed: int,
         errors: list[str],
     ) -> Snapshot:
-        parent = uow.snapshots.latest_complete(system_id)
         snapshot = uow.snapshots.create(
             Snapshot(
                 system_id=system_id,
@@ -205,9 +245,17 @@ class IndexingService:
             )
         )
 
-        existing_by_id = {
-            e.id: e for e in uow.graph.find_entities(system_id, limit=_ALL_ENTITIES_LIMIT)
-        }
+        existing_pool = list(uow.graph.find_entities(system_id, limit=_ALL_ENTITIES_LIMIT))
+        if renames:
+            # Attach GIT_RENAME claims to both sides of a trusted rename
+            # *before* resolution runs, so the ladder has evidence to weigh
+            # (identity/git_evidence.py) — this never decides the outcome by
+            # itself; it only makes the connection visible to the resolver.
+            candidates, existing_pool = identity.attach_rename_evidence(
+                candidates, existing_pool, renames
+            )
+        existing_by_id = {e.id: e for e in existing_pool}
+
         id_remap: dict[str, str] = {}
         resolved_entities: list[Entity] = []
         superseded_entities: list[Entity] = []
@@ -249,6 +297,8 @@ class IndexingService:
 
         uow.observations.record(observations)
         uow.evidence.record(evidence)
+        if events:
+            uow.events.append_many(events)
         uow.graph.upsert_entities([*resolved_entities, *superseded_entities])
         uow.graph.upsert_relationships([*to_insert, *lineage_relationships])
         if stale_ids:
@@ -315,3 +365,25 @@ class IndexingService:
         stale_ids = [rel.id for key, rel in previous_by_key.items() if key not in observed_keys]
         current_count = len(previous_by_key) - len(stale_ids) + len(to_insert)
         return to_insert, stale_ids, current_count
+
+
+def _extract_renames(observations: Sequence[Observation]) -> list[GitRename]:
+    """Pull `GitRename` value objects out of a `HistoryAdapter`'s raw
+    ``git.file_change`` observations — the shape `identity.attach_rename_evidence`
+    actually wants, decoupled from any one adapter's payload dict layout."""
+    renames: list[GitRename] = []
+    for obs in observations:
+        if obs.kind != "git.file_change" or obs.payload.get("status") != "RENAMED":
+            continue
+        old_path = obs.payload.get("old_path")
+        new_path = obs.payload.get("path")
+        similarity = obs.payload.get("similarity")
+        if (
+            isinstance(old_path, str)
+            and isinstance(new_path, str)
+            and isinstance(similarity, int | float)
+        ):
+            renames.append(
+                GitRename(old_path=old_path, new_path=new_path, similarity=float(similarity))
+            )
+    return renames

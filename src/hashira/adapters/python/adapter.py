@@ -65,6 +65,7 @@ class PythonAdapter:
             extracted = extract_file(
                 file,
                 import_root=import_root_for(file, root),
+                project_root=root,
                 system_id=system_id,
                 revision=revision,
             )

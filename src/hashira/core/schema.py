@@ -25,8 +25,11 @@ IR_VERSION: Final = "0.1.2"
 """System IR schema version. Additive changes bump the patch; breaking changes
 bump the minor while 0.x, and require a migration note in docs/IR.md."""
 
-ADAPTER_CONTRACT_VERSION: Final = "0.1.0"
-"""Adapter protocol version. An adapter declares the range it supports (§31)."""
+ADAPTER_CONTRACT_VERSION: Final = "0.1.1"
+"""Adapter protocol version. An adapter declares the range it supports (§31).
+0.1.1: added `ExtractionResult.events` (additive — defaults to empty, so an
+adapter written against 0.1.0 still satisfies this) and the `HistoryAdapter`
+protocol (`ports/adapters.py`), for `hashira.adapters.git.GitAdapter`."""
 
 EVENT_SCHEMA_VERSION: Final = "0.1.0"
 """Event payload envelope version."""

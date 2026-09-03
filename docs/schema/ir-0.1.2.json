@@ -2098,7 +2098,7 @@
   },
   "$id": "https://hashira.dev/schema/ir/0.1.2.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "adapterContractVersion": "0.1.0",
+  "adapterContractVersion": "0.1.1",
   "eventSchemaVersion": "0.1.0",
   "title": "Hashira System IR",
   "version": "0.1.2"

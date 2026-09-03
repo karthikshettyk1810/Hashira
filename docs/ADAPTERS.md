@@ -134,31 +134,69 @@ enforced as a hard adapter rule, not a suggestion — see `resolve.py`'s and
 strongest, followed by `IMPORT` and `MODULE_LOCAL`; anything not covered by
 these is `UNRESOLVED` and stays an observation forever, never promoted.
 
-**A known, deliberate limitation**, found by the adversarial identity suite
-(`tests/integration/test_python_indexing.py`) rather than assumed up front:
-without a Git adapter, `QUALIFIED_NAME` and `DECLARATION_ANCHOR` (file +
+**What this adapter can offer on its own, and where Git now picks up the
+rest** — found by the adversarial identity suite rather than assumed up
+front: on its own, `QUALIFIED_NAME` and `DECLARATION_ANCHOR` (file +
 qualified name + kind) are the only identity signals this adapter can
-honestly offer. `DECLARATION_ANCHOR` is strong enough to keep an unchanged
-symbol's identity stable across re-indexes (IR 0.1.2 — see docs/IR.md's
-changelog), which closed the worst of what the suite first found: an
-ordinary re-index no longer manufactures a new entity generation every run.
-What it still cannot do, honestly: **a rename**. The moment the file or the
-qualified name changes, so does the anchor — there is nothing left to match
-the old entity on, so the renamed symbol resolves as plain `NEW` with no
-lineage, and the old entity is left orphaned (documented in
-`adapters/python/normalizer.py` and `application/indexing.py`). It is safe
-(nothing silently merges or vanishes) but is exactly why the Git/History
-adapter is next, not a nice-to-have.
+honestly produce. `DECLARATION_ANCHOR` is strong enough to keep an unchanged
+symbol's identity stable across re-indexes (IR 0.1.2), so an ordinary
+re-index no longer manufactures a new entity generation every run. A
+**rename**, though, changes the file and/or the qualified name — the anchor
+changes right along with it, so there is nothing left in this adapter's own
+output to match the old entity on. That gap is now closed, but not by this
+adapter: `hashira.adapters.git.GitAdapter` supplies `GIT_RENAME` evidence
+(see the "Git adapter" section below), and `identity/git_evidence.py`
+attaches it before resolution runs, *when a `HistoryAdapter` is configured*.
+Without one, the old behavior stands exactly as before: `NEW` with no
+lineage, the old entity orphaned. Safe either way — nothing silently merges
+or vanishes.
+
+## Git adapter
+
+`src/hashira/adapters/git/` — the `HistoryAdapter` port, satisfied. Reports
+commit history and file-change/rename evidence; never decides what a
+detected rename *means* for identity (that split — "Git provides evidence,
+the resolver decides" — is the adapter's entire design point, see
+`adapter.py`'s module docstring).
+
+**Implementation choice: shell out to the real `git` binary**, through one
+controlled boundary (`runner.py`), rather than a Python Git library. Git is
+the canonical implementation of the thing being interrogated — its rename
+heuristic, its DAG, its ancestry — and reimplementing any of that would just
+be a second, worse copy of logic `git` already gets right. Every other file
+in this package (`repository.py`, `adapter.py`) talks to `runner.run_git`,
+never to `subprocess` directly.
+
+**Revision is a DAG, not a timeline.** `GitRepository.commits()` orders by
+topology (`git log --topo-order`), not by commit timestamp — a timestamp can
+be wrong or out of order; a commit's position in the DAG cannot. Merge
+commits carry every parent (`CommitInfo.parent_shas`, first parent first);
+v0.1 deliberately does not attempt merge-aware indexing semantics beyond
+that — `changed_paths_in_commit` reports a merge commit's changes relative
+to its first parent only, matching how `git log`'s default view already
+simplifies merges for humans.
+
+**Rename detection is Git's own heuristic, kept as a score, not a boolean.**
+`FileChange.similarity` (0.0–1.0) travels all the way from `git diff -M`'s
+output to the `git.file_change` Observation's payload. Whether a given score
+is trustworthy enough to influence identity is `identity/git_evidence.py`'s
+call (a stricter 90% bar than Git's own 50% default), not this adapter's —
+see that module and the "Python adapter" section above for the full chain.
+
+**Tested against real temporary repositories**, not mocked Git output
+(`tests/unit/test_git_repository.py`, `tests/unit/test_git_adapter.py`) —
+root commits, merge commits, exact renames, partial-similarity renames, and
+the adversarial case (a `git mv` plus a total content rewrite, which Git's
+own default threshold already refuses to call a rename).
 
 ## Second adapter target (per the MVP scope decision in ARCHITECTURE.md)
 
-Git adapter (rename evidence, closing the gap above) + Django/Celery
-framework enrichers + a migrations-or-schema-based Postgres data adapter.
-This is the set needed to produce the §40 example end to end in one stack —
-the Python adapter alone already produces most of it (see the worked example
-in `tests/integration/test_python_indexing.py`); Django/Celery/Postgres are
-what turn `INTERFACE`/`DATA_ENTITY`/`MESSAGE_CHANNEL` from "the Python
-adapter's plain SYMBOL/MODULE types" into the framework-aware semantics §18
-describes — before a second *language* adapter is added to prove IR
-portability (§42's "at least two language ecosystems map into the same
-semantic model").
+Django/Celery framework enrichers + a migrations-or-schema-based Postgres
+data adapter. This is the set needed to produce the §40 example end to end
+in one stack — the Python adapter alone already produces most of it (see the
+worked example in `tests/integration/test_python_indexing.py`); Django/
+Celery/Postgres are what turn `INTERFACE`/`DATA_ENTITY`/`MESSAGE_CHANNEL`
+from "the Python adapter's plain SYMBOL/MODULE types" into the
+framework-aware semantics §18 describes — before a second *language* adapter
+is added to prove IR portability (§42's "at least two language ecosystems
+map into the same semantic model").

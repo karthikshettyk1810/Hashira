@@ -48,11 +48,22 @@ def extract_file(
     file: Path,
     *,
     import_root: Path,
+    project_root: Path | None = None,
     system_id: SystemID,
     revision: str | None,
     now: datetime | None = None,
 ) -> ExtractedFile:
-    """Parse one file and return everything this file, on its own, can say."""
+    """Parse one file and return everything this file, on its own, can say.
+
+    ``import_root`` (e.g. a ``src/`` directory) computes the dotted module
+    name; ``project_root`` (the repository root — defaults to ``import_root``
+    when a caller has no better one, e.g. in isolated unit tests) computes
+    the *file path* recorded on every observation and entity. These are
+    deliberately different roots: a Git adapter always reports paths
+    relative to the repository root, and every path this adapter records
+    must agree with that or rename-evidence pairing (identity/git_evidence.py)
+    silently finds nothing to pair.
+    """
     module_qn = module_qualified_name(file, import_root)
     try:
         source = file.read_text(encoding="utf-8")
@@ -65,7 +76,7 @@ def extract_file(
     walker = _Walker(
         module_qn=module_qn,
         file=file,
-        import_root=import_root,
+        project_root=project_root or import_root,
         system_id=system_id,
         revision=revision,
         now=now or datetime.now(UTC),
@@ -160,14 +171,14 @@ class _Walker:
         *,
         module_qn: str,
         file: Path,
-        import_root: Path,
+        project_root: Path,
         system_id: SystemID,
         revision: str | None,
         now: datetime,
     ) -> None:
         self.module_qn = module_qn
         self.file = file
-        self.rel_file = file.relative_to(import_root).as_posix()
+        self.rel_file = file.relative_to(project_root).as_posix()
         self.system_id = system_id
         self.revision = revision
         self.now = now

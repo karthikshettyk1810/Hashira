@@ -39,6 +39,13 @@ envelope changing, and vice versa.
 
 ## Changelog
 
+- **Adapter contract 0.1.1** (IR itself unchanged at 0.1.2) — added
+  `ExtractionResult.events` (additive, defaults to empty — an adapter written
+  against 0.1.0 still satisfies 0.1.1) and the `HistoryAdapter` protocol
+  (`ports/adapters.py`), for `hashira.adapters.git.GitAdapter`. `GIT_RENAME`
+  identity claims (already part of the vocabulary since 0.1.0) are now
+  actually produced, by `identity/git_evidence.py`, closing the gap the
+  0.1.2 entry below left open for renames specifically.
 - **0.1.2** — Added `IdentityClaimKind.DECLARATION_ANCHOR` (file path +
   qualified name + kind, all at once), placed at strong tier in the identity
   ladder. Additive — an existing reader ignores a claim kind it doesn't
@@ -171,8 +178,15 @@ were correct in isolation and still produced a real bug (unconditional
 `SUPERSEDES` on every re-index) once a real adapter fed it real candidates —
 exactly the kind of thing a unit-test-only suite cannot catch on its own.
 
-**Still open, honestly:** a rename still resolves as plain `NEW` with no
-lineage at all (not `SUPERSEDES` — the file and qualified name are the only
-signals the Python adapter can offer, and both change together on a rename,
-leaving nothing to match against). Closing that gap needs a Git adapter's
-`GIT_RENAME` claim, which is the current next step (ROADMAP.md).
+**The `GIT_RENAME` gap is now closed, conditionally.** With a
+`HistoryAdapter` configured (`hashira.adapters.git.GitAdapter`), a rename
+Git detects above a 90% similarity threshold resolves as
+`SUPERSEDES`-with-lineage instead of an orphaned `NEW`
+(`identity/git_evidence.py`, `tests/integration/test_git_identity.py`).
+Without a configured history adapter, or when Git's own detection doesn't
+surface a rename at all (or surfaces one below the threshold — the
+adversarial "disguised replacement" case), the original behavior stands
+unchanged: `NEW`, no lineage, old entity orphaned. Still open: the
+`GIT_RENAME` claim only ever reaches corroborating tier, never strong — a
+rename alone still cannot outright `MATCH`, deliberately, since a heuristic
+similarity score is evidence to weigh, not a fact to trust blindly.

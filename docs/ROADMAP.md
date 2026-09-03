@@ -133,14 +133,59 @@ core rather than the adapter.
     unit tests.
   - Two existing entities sharing a qualified name correctly produce
     `AMBIGUOUS` (a `SPECULATIVE` `HYPOTHESIS`), never a guessed pick.
-- [ ] **Close the rename gap**: Git adapter (repository discovery, commit/
-      rename history, revisions) supplying `GIT_RENAME` identity claims, so a
-      rename can resolve as `SUPERSEDES`-with-lineage instead of orphaning
-      the old entity. Also: real removal detection (an entity with no
-      candidate and no Git-confirmed rename really is gone) and incremental
-      indexing (skip unchanged files rather than re-deriving and reconciling
-      away nothing every run). This is now the most concretely justified next
-      step in this phase — not a guess about what might matter later.
+- [x] **Git adapter** (`src/hashira/adapters/git/`) — `runner.py` (the one
+      place Hashira shells out to `git`), `repository.py` (parsed commits,
+      ancestry, rename/copy detection, all tested against real temporary
+      repositories, not mocked output), `adapter.py` (the `HistoryAdapter`
+      port: commits become `Event`s, file changes and renames become
+      `Observation`s, Git's own similarity score travels with each rename
+      rather than being collapsed into a boolean). Tolerates a bad or stale
+      caller-supplied revision (§30: adapters tolerate partial failure)
+      rather than crashing the indexing run.
+- [x] **`GIT_RENAME` evidence, wired into identity resolution**
+      (`identity/git_evidence.py`) — a rename Git detected above a **90%**
+      similarity threshold (deliberately stricter than Git's own 50% default;
+      see the module for why) becomes a matching claim on both the old and
+      new entities, attached *before* `identity.resolve()` runs. Pairing is
+      precise: the module pairs by file path alone (exactly one module per
+      file); a symbol only pairs when its simple name is unchanged *and*
+      unambiguous on both sides — a symbol renamed in the same commit as its
+      file gets no claim and correctly falls back to orphaned `NEW`, since
+      path and name both changing at once leaves nothing to pair on.
+      `IndexingService` now asks a configured `HistoryAdapter` what happened
+      between the last indexed revision and this one, and feeds the result
+      through before resolution (`application/indexing.py`).
+- [x] **A path-representation bug found and fixed while verifying the above
+      end-to-end**: the Python adapter recorded `source.file` relative to
+      the *import root* (e.g. `shop/payments.py`, stripping a `src/`
+      prefix), while Git always reports paths relative to the *repository
+      root* (`src/shop/payments.py`) — the two never matched, so rename
+      pairing silently found nothing. `extract_file` now takes both roots
+      explicitly and records repo-root-relative paths (`adapters/python/extractor.py`).
+      A reminder that this class of bug — two correct-looking components
+      that silently fail to connect — is exactly what end-to-end adversarial
+      testing catches and unit tests in isolation cannot.
+- [x] **Adversarial suite extended with real Git history**
+      (`tests/integration/test_git_identity.py`): simple rename → lineage
+      preserved; module moved into a subdirectory → lineage preserved;
+      rename plus a modest content edit → lineage preserved at `LIKELY`
+      (not `CERTAIN`) confidence, matching Git's own reported similarity;
+      rename plus a *symbol* rename in the same commit → the module links,
+      the symbol correctly does not; total content rewrite disguised as a
+      `git mv` → no lineage at all, whether or not Git's own heuristic still
+      calls it a rename. Verified against both storage backends.
+- [ ] **Still open**: real removal detection (an entity with no candidate
+      and no Git-confirmed rename really is gone — not attempted yet, since
+      it's easy to get wrong ahead of incremental indexing) and incremental
+      indexing itself (skip unchanged files rather than re-deriving and
+      reconciling away nothing every run). Also open: revision-scoped
+      historical queries (`find_entities(revision=...)`) — Git now supplies
+      the raw ancestry data (`CommitInfo.parent_shas`), but answering "was
+      this true at revision X" needs an ancestry index over that data that
+      does not exist yet; the ports still raise `NotImplementedError` there,
+      correctly, rather than guess. Branch/merge-aware indexing semantics
+      remain deliberately out of scope (`changed_paths_in_commit` reports a
+      merge commit's changes relative to its first parent only).
 - [ ] Django framework enricher — reads a target Django app; views/URLs →
       `INTERFACE`, models → `DATA_ENTITY`. Ships as one adapter among several
       `FrameworkAdapter` implementations, not as a Hashira dependency.
