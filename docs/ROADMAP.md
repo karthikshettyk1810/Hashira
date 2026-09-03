@@ -101,29 +101,45 @@ core rather than the adapter.
       Protocol, not an import of the Python one). This is the piece that
       actually exercises the §30 guarantee end to end, not just at the
       storage layer.
-- [x] **The adversarial identity suite ran, and found real gaps** — not
-      hypothetical ones. Confirmed by `tests/integration/test_python_indexing.py`
-      against real file mutations:
-  - Unchanged-file re-indexing produces `SUPERSEDES`, not `MATCHED` — expected,
-    per the identity ladder's own policy (`QUALIFIED_NAME` alone is
-    corroborating-tier, never enough alone to merge).
-  - **A rename produces plain `NEW` with *no* lineage at all**, and the old
-    entity is left `ACTIVE` and orphaned — worse than originally assumed
-    (`SUPERSEDES` was expected; the honest result is *no connection
-    recorded*, since a rename changes the only signal available). See
-    `adapters/python/normalizer.py`'s "known, deliberate limitation" section.
-  - **Stale relationships are never retracted** — a CALLS/IMPORTS/EXTENDS
-    edge not re-observed this run stays `is_current` forever, since nothing
-    calls `close_relationships()` yet.
+- [x] **The adversarial identity suite ran, found real gaps, and two of them
+      got fixed before Git** — not deferred as "known limitations" once it
+      became clear they were indexing-orchestration bugs, not things only
+      Git evidence could fix. Confirmed by
+      `tests/integration/test_python_indexing.py` against real file mutations:
+  - ~~Unchanged-file re-indexing produced `SUPERSEDES`, not `MATCHED`~~ —
+    **fixed** (IR 0.1.2): added `IdentityClaimKind.DECLARATION_ANCHOR` (file
+    path + qualified name + kind, all at once) as a strong-tier signal. Not
+    independent of `QUALIFIED_NAME` — derived from it — but materially
+    narrower ("the exact site a prior entity came from," not "a name I
+    recognize somewhere"), so it does not reopen the "qualified name alone
+    must not merge" guard. An unchanged project now re-indexes to zero new
+    entities, zero supersessions. See `identity/resolver.py` and
+    `adapters/python/normalizer.py`.
+  - ~~Stale relationships were never retracted~~ — **fixed**: `IndexingService`
+    now reconciles structural relationships (DEFINES/IMPORTS/CALLS/EXTENDS)
+    against what's already current in storage before writing anything — an
+    edge still observed is left exactly as it was (same row), an edge no
+    longer observed is closed via `Relationship.close()`, and only genuinely
+    new edges are inserted. An unchanged project now writes zero new
+    relationship rows; a renamed symbol's stale edges are actually retracted.
+    See `IndexingService._reconcile_relationships`.
+  - **A rename still produces plain `NEW` with *no* lineage at all**, and the
+    old entity is left `ACTIVE` and orphaned — this one genuinely does need
+    Git evidence: the file and qualified name are the only signals available,
+    and a rename changes both at once, leaving nothing to match the old
+    entity on. Not a bug in the ladder — correctly refusing to guess.
   - Structural similarity (copy/paste, extracted methods) correctly never
     creates a false connection — confirmed, not just asserted by the resolver
     unit tests.
   - Two existing entities sharing a qualified name correctly produce
     `AMBIGUOUS` (a `SPECULATIVE` `HYPOTHESIS`), never a guessed pick.
-- [ ] **Close the rename/staleness gap**: Git adapter (repository discovery,
-      commit/rename history, revisions) supplying `GIT_RENAME` identity
-      claims, plus incremental indexing that closes stale relationships and
-      detects real removal. This is now the most concretely justified next
+- [ ] **Close the rename gap**: Git adapter (repository discovery, commit/
+      rename history, revisions) supplying `GIT_RENAME` identity claims, so a
+      rename can resolve as `SUPERSEDES`-with-lineage instead of orphaning
+      the old entity. Also: real removal detection (an entity with no
+      candidate and no Git-confirmed rename really is gone) and incremental
+      indexing (skip unchanged files rather than re-deriving and reconciling
+      away nothing every run). This is now the most concretely justified next
       step in this phase — not a guess about what might matter later.
 - [ ] Django framework enricher — reads a target Django app; views/URLs →
       `INTERFACE`, models → `DATA_ENTITY`. Ships as one adapter among several

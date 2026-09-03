@@ -21,7 +21,7 @@ from .relationships import Relationship
 from .snapshots import Snapshot
 from .state import Deployment, SystemState
 
-IR_VERSION: Final = "0.1.1"
+IR_VERSION: Final = "0.1.2"
 """System IR schema version. Additive changes bump the patch; breaking changes
 bump the minor while 0.x, and require a migration note in docs/IR.md."""
 

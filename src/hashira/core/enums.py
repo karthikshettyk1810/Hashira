@@ -55,6 +55,17 @@ class IdentityClaimKind(StrEnum):
     USER_DECLARED = "USER_DECLARED"
     """An explicit human mapping. Outranks every inferred signal."""
 
+    DECLARATION_ANCHOR = "DECLARATION_ANCHOR"
+    """The exact declaration site: file path + qualified name + kind, all at
+    once. Not independent of ``QUALIFIED_NAME`` — it is derived from it — but
+    materially narrower: two symbols coincidentally sharing a qualified name
+    is plausible across a graph; two coincidentally sharing a qualified name
+    *at the identical file path, of the identical kind* is not. Strong enough
+    to merge in place (an unchanged file re-indexed should not manufacture a
+    new entity generation on every run); still correctly powerless the moment
+    the file, the name, or the kind changes at all — that is exactly the
+    boundary a rename needs Git evidence to cross (docs/IR.md)."""
+
     GIT_RENAME = "GIT_RENAME"
     """Git's own rename/similarity detection between two revisions."""
 

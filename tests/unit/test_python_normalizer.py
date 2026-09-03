@@ -7,7 +7,7 @@ from pathlib import Path
 
 from hashira.adapters.python.extractor import extract_file
 from hashira.adapters.python.normalizer import normalize
-from hashira.core.enums import EntityType, RelationshipType
+from hashira.core.enums import EntityType, IdentityClaimKind, RelationshipType
 from hashira.core.ids import IDPrefix, new_id
 
 
@@ -126,15 +126,60 @@ def test_inheritance_becomes_extends_when_the_base_is_in_this_run(tmp_path: Path
     assert extends[0].target_entity_id == by_qn["shop.models.BaseModel"].id
 
 
-def test_every_entity_carries_a_qualified_name_identity_claim(tmp_path: Path) -> None:
+def test_every_entity_carries_qualified_name_and_declaration_anchor_claims(tmp_path: Path) -> None:
     system_id = new_id(IDPrefix.SYSTEM)
     observations = _extract_all(
         tmp_path, {"shop/payments.py": "class PaymentService:\n    pass\n"}, system_id
     )
     run = normalize(observations, system_id=system_id, revision="rev1")
     for entity in run.entities:
-        assert len(entity.identity_claims) == 1
-        assert entity.identity_claims[0].value == entity.qualified_name
+        claim_kinds = {claim.kind for claim in entity.identity_claims}
+        assert claim_kinds == {
+            IdentityClaimKind.QUALIFIED_NAME,
+            IdentityClaimKind.DECLARATION_ANCHOR,
+        }
+
+        qn_claim = next(
+            c for c in entity.identity_claims if c.kind is IdentityClaimKind.QUALIFIED_NAME
+        )
+        assert qn_claim.value == entity.qualified_name
+
+        anchor_claim = next(
+            c for c in entity.identity_claims if c.kind is IdentityClaimKind.DECLARATION_ANCHOR
+        )
+        assert entity.qualified_name in anchor_claim.value
+        assert entity.source is not None
+        assert entity.source.file in anchor_claim.value
+
+
+def test_declaration_anchor_changes_when_the_file_changes(tmp_path: Path) -> None:
+    """The whole point: an anchor must not survive a move on its own -- that
+    boundary is exactly where Git evidence is still required."""
+    system_id = new_id(IDPrefix.SYSTEM)
+    before = _extract_all(
+        tmp_path, {"shop/payments.py": "class PaymentService:\n    pass\n"}, system_id
+    )
+    run_before = normalize(before, system_id=system_id, revision="rev1")
+    anchor_before = next(
+        c.value
+        for e in run_before.entities
+        for c in e.identity_claims
+        if c.kind is IdentityClaimKind.DECLARATION_ANCHOR
+        and e.qualified_name == "shop.payments.PaymentService"
+    )
+
+    after = _extract_all(
+        tmp_path, {"shop/billing.py": "class PaymentService:\n    pass\n"}, system_id
+    )
+    run_after = normalize(after, system_id=system_id, revision="rev2")
+    anchor_after = next(
+        c.value
+        for e in run_after.entities
+        for c in e.identity_claims
+        if c.kind is IdentityClaimKind.DECLARATION_ANCHOR
+        and e.qualified_name == "shop.billing.PaymentService"
+    )
+    assert anchor_before != anchor_after
 
 
 def test_every_relationship_cites_the_evidence_of_its_source_observation(tmp_path: Path) -> None:
@@ -146,3 +191,28 @@ def test_every_relationship_cites_the_evidence_of_its_source_observation(tmp_pat
     assert run.relationships
     for rel in run.relationships:
         assert rel.evidence_ids
+
+
+def test_two_call_sites_to_the_same_target_produce_one_relationship(tmp_path: Path) -> None:
+    """CALLS means "does A call B at all", not "how many times" -- a
+    function calling the same target from two call sites must not produce
+    two relationship rows (found via a real fixture: PaymentService.process
+    constructs PaymentResult from two different branches)."""
+    system_id = new_id(IDPrefix.SYSTEM)
+    source = (
+        "class Result:\n"
+        "    def __init__(self, ok):\n"
+        "        self.ok = ok\n\n\n"
+        "class Service:\n"
+        "    def run(self, ok):\n"
+        "        if ok:\n"
+        "            return Result(True)\n"
+        "        return Result(False)\n"
+    )
+    observations = _extract_all(tmp_path, {"shop/service.py": source}, system_id)
+    run = normalize(observations, system_id=system_id, revision="rev1")
+
+    calls = [r for r in run.relationships if r.type is RelationshipType.CALLS]
+    assert len(calls) == 1
+    # Evidence from both call sites survives the merge -- neither is dropped.
+    assert len(calls[0].evidence_ids) == 2

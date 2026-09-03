@@ -135,6 +135,60 @@ def test_user_declared_alone_is_matched(system: System) -> None:
     assert decision.outcome is ResolutionOutcome.MATCHED
 
 
+def test_declaration_anchor_alone_is_matched(system: System) -> None:
+    """The exact declaration site (file + qualified name + kind, all at
+    once) is strong enough to merge on its own -- this is what makes an
+    unchanged file re-index resolve as MATCHED instead of manufacturing a
+    new entity generation every run. See core/enums.py's docstring on why
+    this is safe despite being derived from QUALIFIED_NAME rather than
+    truly independent of it."""
+    anchor = _claim(
+        IdentityClaimKind.DECLARATION_ANCHOR,
+        "shop/payments.py::shop.payments.PaymentService::class",
+    )
+    candidate = _entity(system, claims=[anchor])
+    existing = _entity(system, claims=[anchor])
+    decision = resolve(candidate, existing=[existing])
+    assert decision.outcome is ResolutionOutcome.MATCHED
+    assert decision.matched_entity_id == existing.id
+
+
+def test_declaration_anchor_does_not_survive_a_rename(system: System) -> None:
+    """The other half of the same design: change the file or the qualified
+    name and the anchor value changes with it, so a renamed candidate shares
+    *no* signal with the old entity at all -- not even at SUPERSEDES tier."""
+    old_anchor = _claim(
+        IdentityClaimKind.DECLARATION_ANCHOR,
+        "shop/payments.py::shop.payments.PaymentService::class",
+    )
+    new_anchor = _claim(
+        IdentityClaimKind.DECLARATION_ANCHOR,
+        "shop/payments.py::shop.payments.PaymentProcessor::class",
+    )
+    candidate = _entity(system, claims=[new_anchor])
+    existing = _entity(system, claims=[old_anchor])
+    decision = resolve(candidate, existing=[existing])
+    assert decision.outcome is ResolutionOutcome.NEW
+
+
+def test_declaration_anchor_and_qualified_name_together_still_only_matched_once(
+    system: System,
+) -> None:
+    """A realistic candidate (as the Python adapter actually produces one)
+    carries both QUALIFIED_NAME and DECLARATION_ANCHOR -- confirm the two
+    don't somehow compound into anything other than a single MATCHED."""
+    qn = _claim(IdentityClaimKind.QUALIFIED_NAME, "shop.payments.PaymentService")
+    anchor = _claim(
+        IdentityClaimKind.DECLARATION_ANCHOR,
+        "shop/payments.py::shop.payments.PaymentService::class",
+    )
+    candidate = _entity(system, claims=[qn, anchor])
+    existing = _entity(system, claims=[qn, anchor])
+    decision = resolve(candidate, existing=[existing])
+    assert decision.outcome is ResolutionOutcome.MATCHED
+    assert decision.matched_entity_id == existing.id
+
+
 def test_two_corroborating_signals_are_matched() -> None:
     """Qualified name plus git rename, together, are enough to merge outright."""
     system = System(name="s", slug="s")

@@ -136,14 +136,19 @@ these is `UNRESOLVED` and stays an observation forever, never promoted.
 
 **A known, deliberate limitation**, found by the adversarial identity suite
 (`tests/integration/test_python_indexing.py`) rather than assumed up front:
-without a Git adapter, `QUALIFIED_NAME` is the only identity signal this
-adapter can honestly offer, and per the identity ladder's own policy that is
-never enough alone for a `MATCHED` merge. The practical result — a rename
-produces a disconnected `NEW` entity with the old one orphaned, and every
-re-index adds a fresh `SUPERSEDES` link to every unchanged symbol — is fully
-documented in `adapters/python/normalizer.py` and
-`application/indexing.py`. It is safe (nothing silently merges or vanishes)
-but is exactly why the Git/History adapter is next, not a nice-to-have.
+without a Git adapter, `QUALIFIED_NAME` and `DECLARATION_ANCHOR` (file +
+qualified name + kind) are the only identity signals this adapter can
+honestly offer. `DECLARATION_ANCHOR` is strong enough to keep an unchanged
+symbol's identity stable across re-indexes (IR 0.1.2 — see docs/IR.md's
+changelog), which closed the worst of what the suite first found: an
+ordinary re-index no longer manufactures a new entity generation every run.
+What it still cannot do, honestly: **a rename**. The moment the file or the
+qualified name changes, so does the anchor — there is nothing left to match
+the old entity on, so the renamed symbol resolves as plain `NEW` with no
+lineage, and the old entity is left orphaned (documented in
+`adapters/python/normalizer.py` and `application/indexing.py`). It is safe
+(nothing silently merges or vanishes) but is exactly why the Git/History
+adapter is next, not a nice-to-have.
 
 ## Second adapter target (per the MVP scope decision in ARCHITECTURE.md)
 

@@ -24,42 +24,55 @@ adapter and its matching normalizer together (see
 `tests/integration/test_python_indexing.py`); nothing here hardcodes Python.
 The day a second language adapter exists, this file does not change.
 
-## What this does not do, on purpose
+## A boring re-index is boring again
+
+Two related bugs the adversarial suite caught, now fixed here:
+
+- **Relationships are reconciled, not just appended.** `_reconcile_relationships`
+  diffs this run's structural edges (DEFINES/IMPORTS/CALLS/EXTENDS) against
+  whatever is already current in storage before writing anything: an edge
+  that is still observed is left exactly as it was (same row, same
+  `valid_from`, same evidence — not replaced), an edge no longer observed is
+  closed via `Relationship.close()` (`valid_until_revision` set, never
+  deleted), and only genuinely new edges are inserted. Re-indexing an
+  unchanged project now writes zero new relationship rows.
+- **Entities carrying `DECLARATION_ANCHOR` (file + qualified name + kind, see
+  `adapters/python/normalizer.py`) now resolve as `MATCHED`, not `SUPERSEDES`,
+  when nothing about their declaration site changed.** Re-indexing an
+  unchanged project now produces zero new entities and zero supersessions —
+  the identity ladder no longer manufactures a new entity generation on every
+  run just because the only signal available was, until now, correctly too
+  weak to merge on its own.
+
+## What this still does not do, on purpose
 
 - **No incremental indexing.** Every call is a full re-index of the given
-  root (ROADMAP.md Phase 2). Nothing skips a file because it did not change.
+  root (ROADMAP.md Phase 2). Nothing *skips* a file because it did not
+  change — the reconciliation above makes a full re-index cheap to *persist*
+  when nothing changed, not cheap to *compute*.
 - **No removal detection.** An entity with no candidate in this run is left
-  untouched, never marked `REMOVED` — safely diffing against a prior run
-  needs more than this pass does yet.
-- **No stale-relationship retraction.** A relationship not re-observed this
-  run is never closed via `Relationship.close()`; only new edges are added.
-  Combined with the point below, a renamed symbol leaves its *old* CALLS/
-  IMPORTS/EXTENDS edges sitting there as `is_current` alongside the new ones.
-- **Consequently: re-indexing anything unchanged produces a new `SUPERSEDES`
-  link, every time, for every entity.** `QUALIFIED_NAME` is the only identity
-  signal pure-AST analysis can offer (see `adapters/python/normalizer.py`),
-  and it is deliberately not strong enough alone to justify `MATCHED` — so an
-  unchanged symbol, re-indexed on revision N+1, correctly cannot be
-  distinguished from "this symbol was replaced by a coincidentally identical
-  one." The ladder's refusal to guess is correct; the compounding cost is
-  real. All four items above close together once a Git adapter supplies
-  rename/no-change evidence and incremental indexing lands (ROADMAP.md).
+  untouched, never marked `REMOVED`. Its *relationships* do get closed by the
+  reconciliation above (they're no longer observed), but the entity itself
+  is not — distinguishing "genuinely deleted" from "renamed, pending Git
+  evidence" safely needs more than this pass does yet.
+- **A rename is still `NEW` with no lineage**, not `SUPERSEDES` — changing
+  the file or the qualified name changes `DECLARATION_ANCHOR` right along
+  with it, so there is nothing left to match the old entity on. Closing this
+  needs a Git adapter's `GIT_RENAME` evidence (ROADMAP.md), which is next.
 
 None of this is unsafe — nothing is silently merged, overwritten, or deleted.
-It is conservative to the point of leaving real cleanup work for Phase 2,
-which is the trade this pass deliberately makes.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from .. import identity
 from ..core.entities import Entity
-from ..core.enums import SnapshotStatus
+from ..core.enums import RelationshipType, SnapshotStatus
 from ..core.evidence import Evidence, Inference, Observation
 from ..core.ids import SystemID
 from ..core.relationships import Relationship
@@ -221,7 +234,7 @@ class IndexingService:
         def remap(entity_id: str) -> str:
             return id_remap.get(entity_id, entity_id)
 
-        final_relationships = [
+        remapped_structural = [
             rel.model_copy(
                 update={
                     "source_entity_id": remap(rel.source_entity_id),
@@ -229,12 +242,17 @@ class IndexingService:
                 }
             )
             for rel in structural_relationships
-        ] + lineage_relationships
+        ]
+        to_insert, stale_ids, current_count = self._reconcile_relationships(
+            uow, entities=existing_by_id.values(), observed=remapped_structural
+        )
 
         uow.observations.record(observations)
         uow.evidence.record(evidence)
         uow.graph.upsert_entities([*resolved_entities, *superseded_entities])
-        uow.graph.upsert_relationships(final_relationships)
+        uow.graph.upsert_relationships([*to_insert, *lineage_relationships])
+        if stale_ids:
+            uow.graph.close_relationships(stale_ids, revision=revision or "unknown")
         for inference in ambiguity_inferences:
             uow.inferences.save(inference)
 
@@ -243,7 +261,7 @@ class IndexingService:
                 "status": SnapshotStatus.COMPLETE,
                 "statistics": SnapshotStatistics(
                     entity_count=len(resolved_entities),
-                    relationship_count=len(final_relationships),
+                    relationship_count=current_count + len(lineage_relationships),
                     observation_count=len(observations),
                     evidence_count=len(evidence),
                     inference_count=len(ambiguity_inferences),
@@ -254,3 +272,46 @@ class IndexingService:
         )
         uow.snapshots.update(completed)
         return completed
+
+    @staticmethod
+    def _reconcile_relationships(
+        uow: UnitOfWork,
+        *,
+        entities: Iterable[Entity],
+        observed: list[Relationship],
+    ) -> tuple[list[Relationship], list[str], int]:
+        """Diff this run's structural edges against whatever is already
+        current in storage, so a boring re-index neither manufactures a
+        duplicate row for every unchanged call nor leaves a renamed symbol's
+        stale edges sitting there forever.
+
+        Returns the edges that are genuinely new (to insert), the ids of
+        edges no longer observed (to close), and the total number of edges
+        that are current once this run's decisions are applied — an edge
+        that already existed and is still observed is neither inserted nor
+        closed; it simply stays exactly as it was, including its original
+        `valid_from` and evidence.
+
+        Lineage (`SUPERSEDES`) edges are handled separately by the caller:
+        each is a one-time historical fact minted at the moment a
+        supersession is detected, not a recurring structural observation, so
+        there is nothing to reconcile them against.
+        """
+        previous_by_key: dict[tuple[str, str, RelationshipType], Relationship] = {}
+        seen_ids: set[str] = set()
+        for entity in entities:
+            for rel in uow.graph.get_relationships(entity.id, direction="out"):
+                if rel.id in seen_ids or not rel.is_current:
+                    continue
+                seen_ids.add(rel.id)
+                previous_by_key[(rel.source_entity_id, rel.target_entity_id, rel.type)] = rel
+
+        observed_keys = {(rel.source_entity_id, rel.target_entity_id, rel.type) for rel in observed}
+        to_insert = [
+            rel
+            for rel in observed
+            if (rel.source_entity_id, rel.target_entity_id, rel.type) not in previous_by_key
+        ]
+        stale_ids = [rel.id for key, rel in previous_by_key.items() if key not in observed_keys]
+        current_count = len(previous_by_key) - len(stale_ids) + len(to_insert)
+        return to_insert, stale_ids, current_count

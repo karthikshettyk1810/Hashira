@@ -1,7 +1,7 @@
 # System IR
 
 The canonical intermediate representation of a software system (spec §7).
-Current version: `0.1.1` (`hashira.core.IR_VERSION`).
+Current version: `0.1.2` (`hashira.core.IR_VERSION`).
 
 System IR is not an AST. It describes structural reality (what exists),
 behavioral reality (what happens), and historical reality (what changed and
@@ -39,6 +39,17 @@ envelope changing, and vice versa.
 
 ## Changelog
 
+- **0.1.2** — Added `IdentityClaimKind.DECLARATION_ANCHOR` (file path +
+  qualified name + kind, all at once), placed at strong tier in the identity
+  ladder. Additive — an existing reader ignores a claim kind it doesn't
+  recognize; nothing existing changes shape. Fixes a real bug the Python
+  adapter's adversarial test suite caught: without it, re-indexing an
+  *unchanged* file resolved as `SUPERSEDES` rather than `MATCHED`, since
+  `QUALIFIED_NAME` alone is deliberately corroborating-tier — an ordinary
+  `hashira index` would have minted a new entity generation on every run. See
+  `identity/resolver.py`'s and `adapters/python/normalizer.py`'s docstrings
+  for why this doesn't reopen the "qualified name alone must not merge"
+  guard it sits next to.
 - **0.1.1** — `IdentityClaim.kind` narrowed from a free string to the closed
   `IdentityClaimKind` enum, so the identity resolution ladder
   (`hashira.identity.resolver`) has a fixed vocabulary to rank rather than
@@ -130,7 +141,7 @@ dependency — see the module's docstring for the full policy. Summary:
 
 | Signal tier | Kinds | Alone | Corroborated (2+ meaningful kinds) |
 | --- | --- | --- | --- |
-| Strong | `SYMBOL_ID`, `USER_DECLARED` | `MATCHED` (merge) | `MATCHED` |
+| Strong | `SYMBOL_ID`, `USER_DECLARED`, `DECLARATION_ANCHOR` | `MATCHED` (merge) | `MATCHED` |
 | Corroborating | `GIT_RENAME`, `MIGRATION_LINEAGE`, `QUALIFIED_NAME` | `SUPERSEDES` (lineage) | `MATCHED` |
 | Weak | `STRUCTURAL_SIMILARITY` | `NEW` (dropped) | never promotes anything |
 
@@ -148,12 +159,20 @@ corroborated merges, single-signal lineage, weak-signal-alone rejection,
 weak-signal-fails-to-promote, cross-type exclusion, ties/`AMBIGUOUS`, and the
 `apply()` output shape for all four outcomes.
 
-**Still open**, and explicitly out of scope for this pass: wiring the
-resolver into an actual ingestion pipeline (which does not exist yet — no
-adapter has ever called this code), and the adversarial fixture suite against
-*real* renames/extract-method/module-reorg diffs from a fixture repository
-(Phase 2 work, once the Python language adapter exists to produce candidates
-to feed it). The ladder's tier thresholds are also a first cut, not a
-final answer — they are structured so a Phase 2 fixture failure updates one
-constant (`_STRONG`/`_CORROBORATING`/`match_floor`) rather than the algorithm's
-shape.
+**Wired in and adversarially tested against a real fixture, not just unit
+tests of the ladder in isolation.** `hashira.application.indexing`
+(`src/hashira/application/`) runs the resolver for real, and
+`tests/integration/test_python_indexing.py` mutates an actual fixture
+repository (`tests/fixtures/python_basic/`) — renames, extracted methods,
+copy/paste clones, duplicate qualified names — and checks the resulting
+graph, not just the resolver's decision. That suite is what caught the gap
+`DECLARATION_ANCHOR` (0.1.2, above) fixes: the ladder's tier thresholds
+were correct in isolation and still produced a real bug (unconditional
+`SUPERSEDES` on every re-index) once a real adapter fed it real candidates —
+exactly the kind of thing a unit-test-only suite cannot catch on its own.
+
+**Still open, honestly:** a rename still resolves as plain `NEW` with no
+lineage at all (not `SUPERSEDES` — the file and qualified name are the only
+signals the Python adapter can offer, and both change together on a rename,
+leaving nothing to match against). Closing that gap needs a Git adapter's
+`GIT_RENAME` claim, which is the current next step (ROADMAP.md).

@@ -51,13 +51,15 @@ def _entities_by_qn(db: MemoryDatabase, system_id: str) -> dict[str, Entity]:
 
 
 def _relationship_pairs(
-    db: MemoryDatabase, system_id: str, rel_type: RelationshipType
+    db: MemoryDatabase, system_id: str, rel_type: RelationshipType, *, current_only: bool = True
 ) -> set[tuple[str, str]]:
     with db.unit_of_work() as uow:
         entities = uow.graph.find_entities(system_id, limit=10_000)
         pairs: set[tuple[str, str]] = set()
         for entity in entities:
             for rel in uow.graph.get_relationships(entity.id, direction="out", types=[rel_type]):
+                if current_only and not rel.is_current:
+                    continue
                 target = next((e for e in entities if e.id == rel.target_entity_id), None)
                 if target is not None:
                     pairs.add(
@@ -148,45 +150,164 @@ def test_reindexing_creates_a_new_snapshot_chained_to_the_last(
         assert latest.id == second.snapshot.id
 
 
+def test_reindexing_four_times_is_fully_stable(
+    tmp_path: Path, db: MemoryDatabase, system: System
+) -> None:
+    """A regression guard for a real bug the manual verification of the
+    boring-reindex fix caught: `PaymentService.process` in the fixture calls
+    `PaymentResult` from two separate branches, and an earlier version of the
+    normalizer emitted one relationship row per call site rather than per
+    (source, target, type) triple -- so run 1 produced one more relationship
+    than every run after it, since reconciliation only dedupes *across* runs,
+    not within one run's own candidate set. Four runs, not two, so a
+    one-off/first-run artifact can't hide as "eventually stable"."""
+    root = _copy_fixture(tmp_path)
+    service = _new_service(db)
+    counts = [
+        service.index(root, system_id=system.id, revision=f"rev{i}").relationships_upserted
+        for i in range(1, 5)
+    ]
+    assert len(set(counts)) == 1, f"relationship count should be identical every run: {counts}"
+
+    with db.unit_of_work() as uow:
+        entities = uow.graph.find_entities(system.id, limit=10_000)
+    assert all(e.status is EntityStatus.ACTIVE for e in entities)
+
+
 # --- adversarial identity: the same pipeline, real mutations -------------
 
 
-def test_unchanged_file_reindexed_supersedes_not_matches(
+def test_unchanged_project_reindex_is_boring(
     tmp_path: Path, db: MemoryDatabase, system: System
 ) -> None:
-    """The documented limitation (see normalizer.py): pure qualified-name
-    matching cannot justify a merge on its own, so even a byte-identical
-    re-index produces lineage, not an in-place update, until a Git adapter
-    supplies real rename/no-change evidence. This is true for *every* entity
-    on *every* re-index, since v0.1 has no incremental indexing yet (nothing
-    skips a file just because it didn't change) -- so this one symbol stands
-    in for what happens to the whole graph on every run."""
+    """The fix: `DECLARATION_ANCHOR` (file + qualified name + kind) is a
+    strong-tier signal, so an unchanged file re-indexed resolves as MATCHED
+    in place -- no new entity generation, no lineage, and (thanks to
+    relationship reconciliation) no duplicate relationship rows either. A
+    `hashira index` on an untouched project should produce nothing new."""
     root = _copy_fixture(tmp_path)
     service = _new_service(db)
     service.index(root, system_id=system.id, revision="rev1")
+
+    with db.unit_of_work() as uow:
+        before_entities = {e.id: e for e in uow.graph.find_entities(system.id, limit=10_000)}
+        before_relationship_ids = {
+            rel.id
+            for e in before_entities.values()
+            for rel in uow.graph.get_relationships(e.id, direction="out")
+        }
+
+    second = service.index(root, system_id=system.id, revision="rev2")
+
+    with db.unit_of_work() as uow:
+        after_entities = {e.id: e for e in uow.graph.find_entities(system.id, limit=10_000)}
+        after_relationship_ids = {
+            rel.id
+            for e in after_entities.values()
+            for rel in uow.graph.get_relationships(e.id, direction="out")
+        }
+
+    # Same entity ids, same status -- nothing new, nothing superseded.
+    assert set(before_entities) == set(after_entities)
+    assert all(e.status is EntityStatus.ACTIVE for e in after_entities.values())
+
+    # Same relationship rows, by id -- nothing new, nothing closed, no
+    # duplicates. (A closed edge would still have its old id, but would no
+    # longer be `is_current`; a duplicate would add a new id. Neither happened.)
+    assert before_relationship_ids == after_relationship_ids
+    with db.unit_of_work() as uow:
+        all_current = [
+            rel
+            for e in after_entities.values()
+            for rel in uow.graph.get_relationships(e.id, direction="out")
+        ]
+        assert all(rel.is_current for rel in all_current)
+
+    assert second.entities_upserted == len(after_entities)
+    assert second.snapshot.statistics.entity_count == len(after_entities)
+
+
+def test_unrelated_entities_are_unaffected_by_an_unchanged_reindex(
+    tmp_path: Path, db: MemoryDatabase, system: System
+) -> None:
+    """A second, narrower check on the same fix: every entity's id is stable
+    across a no-op re-index, not just the one this test happens to sample."""
+    root = _copy_fixture(tmp_path)
+    service = _new_service(db)
+    service.index(root, system_id=system.id, revision="rev1")
+    ids_before = {e.id for e in _entities_by_qn(db, system.id).values()}
+
+    service.index(root, system_id=system.id, revision="rev2")
+    ids_after = {e.id for e in _entities_by_qn(db, system.id).values()}
+
+    assert ids_before == ids_after
+
+
+def test_adding_one_call_reconciles_precisely(
+    tmp_path: Path, db: MemoryDatabase, system: System
+) -> None:
+    """The three-way split relationship reconciliation is supposed to make:
+    a genuinely new edge is inserted, every untouched edge is left exactly
+    as it was (same row), and nothing is closed, since nothing disappeared."""
+    root = _copy_fixture(tmp_path)
+    service = _new_service(db)
+    service.index(root, system_id=system.id, revision="rev1")
+
+    with db.unit_of_work() as uow:
+        before_ids = {
+            rel.id
+            for e in uow.graph.find_entities(system.id, limit=10_000)
+            for rel in uow.graph.get_relationships(e.id, direction="out")
+        }
+
+    utils = root / "src" / "shop" / "utils.py"
+    utils.write_text(utils.read_text() + "\n\ndef is_negative(amount):\n    return amount < 0\n")
+    checkout = root / "src" / "shop" / "checkout.py"
+    checkout.write_text(
+        checkout.read_text()
+        .replace(
+            "from .payments import PaymentService",
+            "from .payments import PaymentService\nfrom .utils import is_negative",
+        )
+        .replace(
+            "        payment = PaymentService()",
+            "        is_negative(order.total)\n        payment = PaymentService()",
+        )
+    )
     service.index(root, system_id=system.id, revision="rev2")
 
     with db.unit_of_work() as uow:
-        all_entities = uow.graph.find_entities(system.id, limit=10_000)
-    sharing_qn = [e for e in all_entities if e.qualified_name == "shop.payments.PaymentService"]
-    active = [e for e in sharing_qn if e.status is EntityStatus.ACTIVE]
-    superseded = [e for e in sharing_qn if e.status is EntityStatus.SUPERSEDED]
-    assert len(active) == 1
-    assert len(superseded) == 1
+        after = {
+            rel.id: rel
+            for e in uow.graph.find_entities(system.id, limit=10_000)
+            for rel in uow.graph.get_relationships(e.id, direction="out")
+        }
 
-    lineage = _relationship_pairs(db, system.id, RelationshipType.SUPERSEDES)
-    assert (active[0].qualified_name, superseded[0].qualified_name) in lineage
+    after_ids = set(after)
+    new_ids = after_ids - before_ids
+    # shop.utils DEFINES is_negative, shop.checkout IMPORTS is_negative,
+    # and checkout.checkout CALLS is_negative -- exactly the three new facts.
+    assert len(new_ids) == 3
+    assert all(after[i].is_current for i in new_ids)
+
+    # Every previously-existing edge id survives untouched: none were closed,
+    # none were replaced with a fresh row for the same semantic edge.
+    assert before_ids <= after_ids
+    assert all(after[i].is_current for i in before_ids)
+
+    calls = _relationship_pairs(db, system.id, RelationshipType.CALLS)
+    assert ("shop.checkout.CheckoutService.checkout", "shop.utils.is_negative") in calls
 
 
 def test_class_rename_is_new_with_the_old_entity_orphaned(
     tmp_path: Path, db: MemoryDatabase, system: System
 ) -> None:
-    """The honest finding, not the originally-hoped-for one: a rename changes
-    the qualified name, which was the *only* signal this candidate and the
-    old entity could have shared. With nothing left to corroborate, the
-    ladder correctly does not guess a connection -- the renamed class comes
-    back as NEW, with zero lineage to its former self, and the old entity is
-    left ACTIVE and orphaned (v0.1 has no removal detection either). This is
+    """A rename changes both the qualified name and `DECLARATION_ANCHOR` (see
+    normalizer.py), which were the *only* signals this candidate and the old
+    entity could have shared. With nothing left to corroborate, the ladder
+    correctly does not guess a connection -- the renamed class comes back as
+    NEW, with zero lineage to its former self, and the old entity is left
+    ACTIVE and orphaned (v0.1 has no removal detection either). This is
     safe (nothing is silently merged or deleted) but not useful continuity;
     closing that gap needs a Git adapter's rename evidence (ROADMAP.md)."""
     root = _copy_fixture(tmp_path)
@@ -217,16 +338,21 @@ def test_class_rename_is_new_with_the_old_entity_orphaned(
         "shop.payments.PaymentProcessor.process",
     ) in calls
 
-    # The *stale* edge to the old symbol is not retracted, though -- another
-    # facet of the same limitation: this pipeline only ever adds relationship
-    # observations, it never calls `close_relationships()` for an edge no
-    # longer observed. Diffing against the prior run to retract stale edges
-    # is incremental-indexing work, not yet built (see indexing.py's
-    # docstring and ROADMAP.md Phase 2). Documented here, not hidden.
+    # The *stale* edge to the old symbol is retracted, not left dangling:
+    # relationship reconciliation (indexing.py) closes any edge not
+    # re-observed this run. It still exists -- history stays readable -- but
+    # is no longer current.
     assert (
         "shop.checkout.CheckoutService.checkout",
         "shop.payments.PaymentService.process",
-    ) in calls
+    ) not in calls
+    all_calls_including_closed = _relationship_pairs(
+        db, system.id, RelationshipType.CALLS, current_only=False
+    )
+    assert (
+        "shop.checkout.CheckoutService.checkout",
+        "shop.payments.PaymentService.process",
+    ) in all_calls_including_closed
 
 
 def test_extracted_method_is_new_not_falsely_merged(
@@ -304,20 +430,13 @@ def test_structurally_similar_code_in_a_new_module_is_never_linked(
     assert clone_entity.status is EntityStatus.ACTIVE
     assert original_entity.status is EntityStatus.ACTIVE  # untouched by the clone
 
-    # Every unchanged entity in the fixture legitimately gets SUPERSEDES
-    # lineage on this second full re-index (see the "unchanged file" test
-    # above) -- that is expected. What must never happen is the *clone*
-    # appearing in that lineage at all: it is new, not a continuation of
-    # anything, and structural similarity must not manufacture a connection.
+    # Nothing was renamed, only a new file added -- with unchanged entities
+    # now resolving as MATCHED (not SUPERSEDES), the whole run should
+    # produce zero lineage at all. In particular, the clone must not appear
+    # anywhere in it: it is new, not a continuation of anything, and
+    # structural similarity must not manufacture a connection.
     lineage = _relationship_pairs(db, system.id, RelationshipType.SUPERSEDES)
-    clone_names = {
-        "shop.refunds",
-        "shop.refunds.RefundService",
-        "shop.refunds.RefundResult",
-        "shop.refunds.RefundService.process",
-        "shop.refunds.RefundService.validate",
-    }
-    assert not any(source in clone_names or target in clone_names for source, target in lineage)
+    assert not lineage
 
 
 def _entity_with_qualified_name_claim(system_id: str, qualified_name: str, name: str) -> Entity:

@@ -19,8 +19,15 @@ trace of why — a wrong merge must be explainable and reversible.
 Signals are grouped into three tiers by how much a single hit is worth
 trusting on its own:
 
-* **Strong** — ``SYMBOL_ID``, ``USER_DECLARED``. Either one, alone, at or
-  above ``match_floor`` confidence, is enough to merge outright.
+* **Strong** — ``SYMBOL_ID``, ``USER_DECLARED``, ``DECLARATION_ANCHOR``. Any
+  one, alone, at or above ``match_floor`` confidence, is enough to merge
+  outright. ``DECLARATION_ANCHOR`` (file path + qualified name + kind, all at
+  once) is not independent of ``QUALIFIED_NAME`` — it is derived from it —
+  but is materially narrower: it only matches the exact declaration site a
+  prior entity came from, not "a name I recognize somewhere." That is what
+  makes an unchanged file re-index resolve as ``MATCHED`` instead of minting
+  a new entity generation on every run, without weakening the guard against
+  qualified names colliding by coincidence elsewhere in the graph.
 * **Corroborating** — ``GIT_RENAME``, ``MIGRATION_LINEAGE``, ``QUALIFIED_NAME``.
   One of these alone justifies recording lineage (a new entity, linked to the
   old one by ``SUPERSEDES``) but not an outright merge — a qualified name can
@@ -85,7 +92,11 @@ class ResolutionOutcome(StrEnum):
 
 
 _STRONG: frozenset[IdentityClaimKind] = frozenset(
-    {IdentityClaimKind.SYMBOL_ID, IdentityClaimKind.USER_DECLARED}
+    {
+        IdentityClaimKind.SYMBOL_ID,
+        IdentityClaimKind.USER_DECLARED,
+        IdentityClaimKind.DECLARATION_ANCHOR,
+    }
 )
 _CORROBORATING: frozenset[IdentityClaimKind] = frozenset(
     {
