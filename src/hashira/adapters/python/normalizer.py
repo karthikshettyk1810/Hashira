@@ -50,11 +50,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ...core.base import SourceLocation, TechnologyInfo
-from ...core.entities import Entity, IdentityClaim
-from ...core.enums import Confidence, EntityType, IdentityClaimKind, Origin, RelationshipType
+from ...core.entities import Entity
+from ...core.enums import EntityType, Origin, RelationshipType
 from ...core.evidence import Observation
 from ...core.ids import SystemID
 from ...core.relationships import Relationship
+from .._dedup import deduplicate_relationships
+from .._identity_claims import declaration_anchor_claim, qualified_name_claim
 
 __all__ = ["NormalizedRun", "normalize"]
 
@@ -66,29 +68,6 @@ class NormalizedRun:
     unresolved: list[Observation]
     """Observations that named a plausible target this run could not confirm
     — never promoted to a Relationship, kept for diagnostics/review."""
-
-
-def _qualified_name_claim(qualified_name: str) -> IdentityClaim:
-    return IdentityClaim(
-        kind=IdentityClaimKind.QUALIFIED_NAME,
-        value=qualified_name,
-        origin=Origin.PARSER,
-        confidence=Confidence.CERTAIN,
-    )
-
-
-def _declaration_anchor_claim(file: str, qualified_name: str, kind: str) -> IdentityClaim:
-    """The exact declaration site, all three parts at once. See
-    `IdentityClaimKind.DECLARATION_ANCHOR`'s docstring for why this is safe
-    to treat as strong: it changes the moment the file, name, or kind does,
-    so it can never survive a rename on its own — that boundary is exactly
-    where Git evidence is still required (module docstring above)."""
-    return IdentityClaim(
-        kind=IdentityClaimKind.DECLARATION_ANCHOR,
-        value=f"{file}::{qualified_name}::{kind}",
-        origin=Origin.PARSER,
-        confidence=Confidence.CERTAIN,
-    )
 
 
 def _module_entity(obs: Observation, *, system_id: SystemID, revision: str | None) -> Entity:
@@ -103,8 +82,8 @@ def _module_entity(obs: Observation, *, system_id: SystemID, revision: str | Non
         source=SourceLocation(file=file, revision=revision),
         technology=TechnologyInfo(language="python"),
         identity_claims=[
-            _qualified_name_claim(qn),
-            _declaration_anchor_claim(file, qn, "module"),
+            qualified_name_claim(qn),
+            declaration_anchor_claim(file, qn, "module"),
         ],
         first_seen_revision=revision,
         last_seen_revision=revision,
@@ -133,8 +112,8 @@ def _symbol_entity(obs: Observation, *, system_id: SystemID, revision: str | Non
             "decorators": obs.payload["decorators"],
         },
         identity_claims=[
-            _qualified_name_claim(qn),
-            _declaration_anchor_claim(file, qn, kind),
+            qualified_name_claim(qn),
+            declaration_anchor_claim(file, qn, kind),
         ],
         first_seen_revision=revision,
         last_seen_revision=revision,
@@ -239,34 +218,6 @@ def normalize(
 
     return NormalizedRun(
         entities=entities,
-        relationships=_deduplicate(relationships),
+        relationships=deduplicate_relationships(relationships),
         unresolved=unresolved,
     )
-
-
-def _deduplicate(relationships: list[Relationship]) -> list[Relationship]:
-    """Multiple call sites (or import statements, or base-class mentions...)
-    between the same two entities must not become multiple relationship
-    rows: `CALLS` means "does A call B at all", not "how many times". Merge
-    every contributing observation's evidence onto one relationship instead
-    of losing it or duplicating the edge.
-
-    This matters beyond tidiness: `IndexingService`'s relationship
-    reconciliation diffs by `(source, target, type)` against what is already
-    current in storage (application/indexing.py) — an un-deduplicated
-    candidate set here would make even a perfectly unchanged file look
-    different from itself between runs, one call site at a time.
-    """
-    merged: dict[tuple[str, str, RelationshipType], Relationship] = {}
-    for rel in relationships:
-        key = (rel.source_entity_id, rel.target_entity_id, rel.type)
-        existing = merged.get(key)
-        if existing is None:
-            merged[key] = rel
-            continue
-        combined_evidence = list(existing.evidence_ids)
-        for evidence_id in rel.evidence_ids:
-            if evidence_id not in combined_evidence:
-                combined_evidence.append(evidence_id)
-        merged[key] = existing.model_copy(update={"evidence_ids": combined_evidence})
-    return list(merged.values())

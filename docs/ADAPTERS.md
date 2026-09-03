@@ -189,14 +189,80 @@ root commits, merge commits, exact renames, partial-similarity renames, and
 the adversarial case (a `git mv` plus a total content rewrite, which Git's
 own default threshold already refuses to call a rename).
 
+## Django adapter
+
+`src/hashira/adapters/django/` — the `FrameworkAdapter` port, satisfied, and
+the first proof that the graph is genuinely cross-domain rather than a code
+graph with extra labels. See `adapter.py`'s module docstring for the exact
+reuse boundary; summarized here:
+
+**Reused from Python, never re-derived**: classes, functions, methods,
+imports, and — critically — *resolved inheritance*. A class is a Django
+model only because a `python.inheritance` observation the Python adapter
+already produced resolves its base to `django.db.models.Model`; this adapter
+never re-parses a class definition to figure that out itself.
+
+**Genuinely new parsing, done by this adapter and nowhere else**: model
+fields (`status = models.CharField(...)`, a class-body attribute assignment
+Python's extractor has no reason to track generally), URL patterns
+(`urlpatterns = [path(...), ...]`, a plain list literal with no
+Python-symbol shape at all), and field access (`payment.status = ...`,
+attribute reads/writes — Python's extractor only tracks calls). All three
+reuse `adapters.python.resolve.resolve_expr` for name resolution and seed
+their resolution context from Python's own `python.import` observations —
+the *mechanism* is shared, only the *target pattern* (field declarations,
+URL literals, attribute access) is Django-specific.
+
+**Detection is evidence-based, never name-based** (`known_bases.py`): a
+curated, closed allowlist of fully-qualified Django/DRF base class names,
+matched against *resolved* inheritance — the same discipline the identity
+ladder applies to entity identity applies here to framework detection. A
+class named `PaymentModel` that extends nothing Django-related is not a
+model; a class extending some unrelated `Model` imported from elsewhere is
+not a model either (both are tested explicitly).
+
+**A model/view class is tagged, not duplicated or reclassified**
+(`normalizer.py`): it stays `EntityType.SYMBOL`, with
+`metadata.framework`/`django_kind` set — the class is still fundamentally
+"a Python class" (core/base.py's own rule: technology detail belongs in
+metadata, never a reshaped core envelope). Model fields and URL routes,
+which have no Python-symbol counterpart at all, get freshly minted
+`SYMBOL`/`INTERFACE` entities carrying the exact same `QUALIFIED_NAME` +
+`DECLARATION_ANCHOR` identity-claim shape Python's own entities carry, via
+two small utilities pulled out for both normalizers to share:
+`adapters/_dedup.py` and `adapters/_identity_claims.py`.
+
+**Two-stage, same as Python** (`adapters/python/normalizer.py`'s pattern):
+`adapter.py` (Stage 1) only ever produces `Observation`s — never
+`Entity`/`Relationship` objects directly. `normalizer.py` (Stage 2) is what
+turns `django.model_field` into a `SYMBOL` entity `CONTAINS`-related to its
+model, and `django.url_route` into an `INTERFACE` that `EXPOSES` the view
+Python already resolved — and it runs *after* Python's own normalizer,
+deliberately, since linking a route to a view requires that view to already
+exist as a candidate with a real qualified name to look up.
+
+**Verified end to end**, not just unit-tested in isolation
+(`tests/integration/test_django_identity.py`, against
+`tests/fixtures/django_basic/`): the exact worked example from the design
+discussion — *"what is affected if `Payment.status` changes?"*, answered by
+walking the graph backward through non-structural edges — plus the same
+boring-reindex and cross-backend (SQLite/memory) checks every other adapter
+in this repository is held to.
+
+**Not attempted in this pass**, documented rather than silently missing:
+function-based views, abstract model inheritance chains, `self.attr` field
+access (only local-variable instances are tracked, matching the Python
+resolver's own scope limit), and resolving `include()`'d URL confs across
+files.
+
 ## Second adapter target (per the MVP scope decision in ARCHITECTURE.md)
 
-Django/Celery framework enrichers + a migrations-or-schema-based Postgres
-data adapter. This is the set needed to produce the §40 example end to end
-in one stack — the Python adapter alone already produces most of it (see the
-worked example in `tests/integration/test_python_indexing.py`); Django/
-Celery/Postgres are what turn `INTERFACE`/`DATA_ENTITY`/`MESSAGE_CHANNEL`
-from "the Python adapter's plain SYMBOL/MODULE types" into the
-framework-aware semantics §18 describes — before a second *language* adapter
-is added to prove IR portability (§42's "at least two language ecosystems
-map into the same semantic model").
+A Celery async enricher + a migrations-or-schema-based Postgres data
+adapter. This is the remaining piece needed to produce the §40 example end
+to end in one stack — Python + Django already produce most of it (see the
+worked example above); Celery/Postgres are what turn `PROCESS`/
+`MESSAGE_CHANNEL`/`DATA_ENTITY` (async workflows, queues, the data layer
+below the ORM) from unmodeled into framework-aware semantics §18
+describes — before a second *language* adapter is added to prove IR
+portability (§42's "at least two language ecosystems map into the same
+semantic model").

@@ -186,9 +186,51 @@ core rather than the adapter.
       correctly, rather than guess. Branch/merge-aware indexing semantics
       remain deliberately out of scope (`changed_paths_in_commit` reports a
       merge commit's changes relative to its first parent only).
-- [ ] Django framework enricher — reads a target Django app; views/URLs →
-      `INTERFACE`, models → `DATA_ENTITY`. Ships as one adapter among several
-      `FrameworkAdapter` implementations, not as a Hashira dependency.
+- [x] **Django framework enricher** (`src/hashira/adapters/django/`) — the
+      first proof that the graph is genuinely cross-domain, not just a code
+      graph with extra steps. Built on Python's own observations, not a
+      second parse of Python (`adapter.py`'s module docstring spells out the
+      reuse boundary): models and views are detected from *resolved*
+      inheritance (`python.inheritance` observations against a closed,
+      evidence-based allowlist in `known_bases.py` — never a name-suffix
+      guess), model fields and URL patterns are this adapter's own
+      genuinely-new targeted parsing (Python's extractor has no concept of
+      either), and field reads/writes are detected via the same
+      `LOCAL_INSTANCE` pattern the Python resolver already established, reused
+      via its public `resolve_expr`.
+  - **The killer test passes**: `tests/integration/test_django_identity.py`
+    indexes a real Django-shaped fixture (`tests/fixtures/django_basic/`)
+    and answers *"what is affected if `Payment.status` changes?"* by walking
+    the graph backward through non-structural edges — reaching
+    `PaymentService.process` (writes/reads the field directly),
+    `CheckoutView.post` and the test that calls it (both `CALLS` the
+    service) — entirely from stored relationships, no LLM involved. The
+    `/checkout/` route is one more hop away via `EXPOSES`.
+  - **A model class is tagged, not duplicated or reclassified**: it stays
+    `EntityType.SYMBOL` (still fundamentally a Python class — core/base.py's
+    own rule that technology detail belongs in metadata, never a reshaped
+    core envelope) with `metadata.framework`/`django_kind` set. Model
+    fields and URL routes, which have no Python-symbol counterpart at all,
+    get freshly minted `SYMBOL`/`INTERFACE` entities with the exact same
+    `QUALIFIED_NAME` + `DECLARATION_ANCHOR` identity-claim shape Python's own
+    entities carry — an unchanged Django project re-indexes exactly as
+    boring as an unchanged Python one (verified, not assumed).
+  - Two small shared utilities came out of this pass:
+    `adapters/_dedup.py` (relationship deduplication, previously private to
+    Python's normalizer) and `adapters/_identity_claims.py` (the
+    `QUALIFIED_NAME`/`DECLARATION_ANCHOR` claim builders) — both normalizers
+    now import the same logic instead of risking two normalizers deciding
+    identity slightly differently.
+  - `IndexingService` gained `framework_adapters`: each `enrich()` call
+    receives everything extracted so far and returns only its own additions,
+    merged in before normalization runs (`application/indexing.py`).
+  - **Not attempted in this pass**: function-based views, abstract model
+    inheritance chains (a model extending another model extending
+    `models.Model`), `self.attr` field access (only local variables are
+    tracked, matching the Python resolver's own `LOCAL_INSTANCE` limit), and
+    resolving `include()`'d URL confs across files (a route whose target
+    doesn't resolve stays an `INTERFACE` entity with no `EXPOSES` edge,
+    correctly, rather than a guess).
 - [ ] Celery async enricher — reads a target Celery app; tasks → `PROCESS`,
       queues → `MESSAGE_CHANNEL`.
 - [ ] Postgres data adapter, from migrations/schema (§21: "do not make vector

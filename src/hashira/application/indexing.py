@@ -6,10 +6,11 @@ source. Wiring them together — and giving the whole run the §30 transactional
 guarantee — is this module's entire job.
 
 ```
-LanguageAdapter.extract()  ->  Observation[] + Evidence[]      (pure, no I/O)
-Normalizer (injected)      ->  candidate Entity[]/Relationship[]  (pure)
-identity.resolve()/apply() ->  MATCHED/SUPERSEDES/NEW/AMBIGUOUS   (pure)
-UnitOfWork                 ->  everything committed as one transaction
+LanguageAdapter.extract()   ->  Observation[] + Evidence[]         (pure, no I/O)
+FrameworkAdapter.enrich()   ->  more Observation[]/Evidence[]      (pure, no I/O)
+Normalizer (injected)       ->  candidate Entity[]/Relationship[]  (pure)
+identity.resolve()/apply()  ->  MATCHED/SUPERSEDES/NEW/AMBIGUOUS   (pure)
+UnitOfWork                  ->  everything committed as one transaction
 ```
 
 Extraction and normalization happen *before* the transaction opens — they are
@@ -17,12 +18,18 @@ pure CPU work with no reason to hold a database connection. Only identity
 resolution and persistence run inside the `with uow:` block, so a crash
 anywhere in that block leaves the last known-good snapshot exactly as it was.
 
-This service is deliberately ignorant of which *language* it is indexing:
-`Normalizer` below is a structural Protocol, not an import of
-`hashira.adapters.python.normalizer.normalize`. A caller wires a specific
-adapter and its matching normalizer together (see
-`tests/integration/test_python_indexing.py`); nothing here hardcodes Python.
-The day a second language adapter exists, this file does not change.
+This service is deliberately ignorant of which *language* or *framework* it
+is indexing: `Normalizer` below is a structural Protocol, not an import of
+`hashira.adapters.python.normalizer.normalize`, and `framework_adapters` is
+just a list of `FrameworkAdapter`s — nothing here hardcodes Python or
+Django. A caller wires a specific combination together (see
+`tests/integration/test_python_indexing.py` for Python alone,
+`tests/integration/test_django_identity.py` for Python + Django); the day a
+second language or framework adapter exists, this file does not change.
+Framework adapters enrich what the language adapters already found — each
+`enrich()` call receives everything extracted so far and returns only its
+own additions (`adapters/django/adapter.py`'s module docstring explains why
+a framework adapter must not re-derive language-level structure).
 
 ## A boring re-index is boring again
 
@@ -93,7 +100,7 @@ from ..core.relationships import Relationship
 from ..core.schema import IR_VERSION
 from ..core.snapshots import Snapshot, SnapshotStatistics
 from ..identity import GitRename
-from ..ports.adapters import HistoryAdapter, LanguageAdapter
+from ..ports.adapters import ExtractionResult, FrameworkAdapter, HistoryAdapter, LanguageAdapter
 from ..ports.repositories import UnitOfWork
 
 __all__ = ["IndexingResult", "IndexingService", "Normalizer"]
@@ -149,11 +156,13 @@ class IndexingService:
         adapters: Sequence[LanguageAdapter],
         normalize: Normalizer,
         history_adapters: Sequence[HistoryAdapter] = (),
+        framework_adapters: Sequence[FrameworkAdapter] = (),
     ) -> None:
         self._uow_factory = uow_factory
         self._adapters = adapters
         self._normalize = normalize
         self._history_adapters = history_adapters
+        self._framework_adapters = framework_adapters
 
     def index(self, root: Path, *, system_id: SystemID, revision: str | None) -> IndexingResult:
         with self._uow_factory() as uow:
@@ -172,6 +181,20 @@ class IndexingService:
             all_observations.extend(extraction.observations)
             all_evidence.extend(extraction.evidence)
             errors.extend(extraction.errors)
+
+        # Framework adapters enrich what the language adapters already found
+        # — they never re-derive it. `base` is a read-only snapshot of the
+        # language-level result so far; each adapter's `enrich()` returns
+        # only its own additions (see adapters/django/adapter.py), which get
+        # folded into the same running lists everything else here uses.
+        for framework_adapter in self._framework_adapters:
+            base = ExtractionResult(
+                observations=list(all_observations), evidence=list(all_evidence)
+            )
+            addition = framework_adapter.enrich(root, base, system_id=system_id, revision=revision)
+            all_observations.extend(addition.observations)
+            all_evidence.extend(addition.evidence)
+            errors.extend(addition.errors)
 
         renames: list[GitRename] = []
         for history_adapter in self._history_adapters:
