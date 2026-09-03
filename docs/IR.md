@@ -190,3 +190,74 @@ unchanged: `NEW`, no lineage, old entity orphaned. Still open: the
 `GIT_RENAME` claim only ever reaches corroborating tier, never strong — a
 rename alone still cannot outright `MATCH`, deliberately, since a heuristic
 similarity score is evidence to weigh, not a fact to trust blindly.
+
+## Revision-scoped queries (§13) — status
+
+["One temporal source of truth"](#one-temporal-source-of-truth) above already
+settled the model: revision-keyed relationship validity is the truth, and a
+snapshot is a named label on a revision, not a second store. This milestone
+did not revise that — it built the two pieces §13's "was this true at
+revision X" question actually needed on top of it, and confirmed the model
+held up once something depended on it.
+
+**Revision ancestry as a core concept, not a Git object.**
+`core/revisions.py::Revision` records one point in history — `system_id`,
+`sha`, `parent_shas`, `provider` — keyed by the same natural, provider-issued
+sha string every other revision-keyed field in the IR already uses
+(`Entity.first_seen_revision`, `Relationship.valid_from_revision`,
+`Snapshot.revision`), not a second opaque id every caller would have to
+translate through. `RevisionGraph` answers ancestry ("was `sha` reached by
+the time we got to `of`?") by walking `parent_shas` — plain graph
+reachability, not a `git log` call and not a timestamp comparison (a commit's
+clock can be wrong; its DAG position cannot). The core still imports nothing
+Git-specific; `hashira.adapters.git.GitAdapter` is simply the one adapter
+that populates `Revision` records today, via
+`application/indexing.py::_extract_revisions` turning `git.commit`
+observations into them and persisting them through a new `RevisionStore`
+port, held to the same shared conformance suite (`tests/contract/uow_conformance.py`)
+as every other port.
+
+**Historical query, kept deliberately boring.**
+`application/history.py::query_at_revision` does not reconstruct anything —
+it loads the current, fully-materialized graph and filters it against each
+record's own revision-keyed validity using `RevisionGraph`, per record:
+
+- An entity is present at revision `R` if its `first_seen_revision` is `R` or
+  an ancestor of it, and it was not superseded at a revision that is `R` or
+  an ancestor of it. `Entity` itself never records *when* a supersession
+  happened (`identity/resolver.py::apply`'s `SUPERSEDES` branch flips
+  `status` but leaves `last_seen_revision` untouched) — the lineage
+  `Relationship`'s own `valid_from_revision` is the only record of that
+  moment, so the query reads it from there instead.
+- A relationship is present at `R` under the same rule applied to
+  `valid_from_revision`/`valid_until_revision` — the exact fields
+  `_reconcile_relationships` (`application/indexing.py`) already maintains
+  for the ordinary, non-historical case.
+- `revision=None` means today: not-superseded entities and `is_current`
+  edges, the same set an ordinary (non-historical) query already returns.
+
+This is deliberately a second, higher-level mechanism, not a retrofit of
+`GraphRepository.find_entities(revision=...)` / `get_relationships(revision=...)`
+— those two port methods still raise `NotImplementedError` on both storage
+backends, reserved for a future storage-native, indexed implementation that
+does not need to load a whole system's graph into memory per query. Getting
+the semantics right first, at fixture/demo scale, was the explicit ask.
+
+**A real bug this surfaced**: filtering relationships to "both endpoints
+present at this revision" silently dropped every `SUPERSEDES` edge the
+moment a query reached or passed the revision it was minted at — because a
+lineage edge's entire purpose is to point from a currently-present entity
+back at one that, by definition, is not. Fixed by exempting `SUPERSEDES`
+from the target-presence check (`application/history.py::_bounded`); found
+by the second brutal integration test below, not by inspection.
+
+Proven end-to-end in `tests/integration/test_temporal_queries.py`: a real
+Git history (commits A–D) over the Django fixture where a structural edit at
+C breaks the `Payment.status` impact chain and a route change at D must not
+leak backwards; and a second scenario combining the existing rename-lineage
+machinery with revision-scoped querying — the pre-rename entity visible only
+before the move, the post-rename entity (with its `GIT_RENAME` claim and
+`SUPERSEDES` edge intact) visible only from the move onward, and an
+unrelated *disguised* rename in the same history still refused at every
+revision, proving the revision-query layer cannot launder a bad merge into
+looking legitimate just because time passed.

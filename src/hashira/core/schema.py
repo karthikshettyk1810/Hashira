@@ -18,12 +18,16 @@ from .events import Event
 from .evidence import Evidence, Inference, Observation
 from .incidents import Incident
 from .relationships import Relationship
+from .revisions import Revision
 from .snapshots import Snapshot
 from .state import Deployment, SystemState
 
-IR_VERSION: Final = "0.1.2"
+IR_VERSION: Final = "0.1.3"
 """System IR schema version. Additive changes bump the patch; breaking changes
-bump the minor while 0.x, and require a migration note in docs/IR.md."""
+bump the minor while 0.x, and require a migration note in docs/IR.md.
+0.1.3: added `Revision` (ancestry record for revision-scoped queries, see
+`application.history` and `core.revisions.RevisionGraph`) -- additive, no
+existing record type changed shape."""
 
 ADAPTER_CONTRACT_VERSION: Final = "0.1.1"
 """Adapter protocol version. An adapter declares the range it supports (§31).
@@ -44,6 +48,7 @@ IR_MODELS: Final[dict[str, type[BaseModel]]] = {
     "Observation": Observation,
     "Inference": Inference,
     "Event": Event,
+    "Revision": Revision,
     "Snapshot": Snapshot,
     "Change": Change,
     "Incident": Incident,

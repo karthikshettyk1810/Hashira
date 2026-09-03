@@ -27,14 +27,17 @@ from ..core.enums import EntityType, RelationshipType
 from ..core.events import Event
 from ..core.evidence import Evidence, Inference, Observation
 from ..core.relationships import Relationship
+from ..core.revisions import Revision
 from ..core.snapshots import Snapshot
 
 __all__ = ["MemoryDatabase", "MemoryUnitOfWork"]
 
 _REVISION_QUERY_UNSUPPORTED = (
-    "revision-scoped queries need Git revision ordering, which does not exist "
-    "yet (see docs/IR.md#identity-resolution-10--status); omit `revision` and "
-    "use `at` for wall-clock-in-time queries instead of a silently wrong answer"
+    "this port does not do revision-scoped querying natively; use "
+    "hashira.application.history.query_at_revision(uow, ...) instead, which "
+    "answers it correctly today by filtering the current graph against "
+    "recorded revision ancestry -- see that module's docstring. Omitting "
+    "`revision` here or using `at` for wall-clock time both still work."
 )
 
 
@@ -48,6 +51,7 @@ class _Store:
     evidence: dict[str, Evidence] = field(default_factory=dict)
     inferences: dict[str, Inference] = field(default_factory=dict)
     snapshots: dict[str, Snapshot] = field(default_factory=dict)
+    revisions: dict[tuple[str, str], Revision] = field(default_factory=dict)
 
     def copy(self) -> _Store:
         return _Store(
@@ -59,6 +63,7 @@ class _Store:
             evidence=dict(self.evidence),
             inferences=dict(self.inferences),
             snapshots=dict(self.snapshots),
+            revisions=dict(self.revisions),
         )
 
 
@@ -297,6 +302,24 @@ class _SnapshotStore:
         return found[:limit]
 
 
+class _RevisionStore:
+    def __init__(self, store: _Store) -> None:
+        self._store = store
+
+    def record(self, revisions: Iterable[Revision]) -> Sequence[Revision]:
+        saved = list(revisions)
+        for revision in saved:
+            self._store.revisions.setdefault((revision.system_id, revision.sha), revision)
+        return saved
+
+    def get(self, system_id: str, sha: str) -> Revision | None:
+        return self._store.revisions.get((system_id, sha))
+
+    def find(self, system_id: str, *, limit: int = 100_000) -> Sequence[Revision]:
+        found = [r for (sid, _sha), r in self._store.revisions.items() if sid == system_id]
+        return found[:limit]
+
+
 class MemoryUnitOfWork:
     """One transaction over a `MemoryDatabase`. See module docstring for the
     copy-on-write isolation this relies on."""
@@ -308,6 +331,7 @@ class MemoryUnitOfWork:
     evidence: _EvidenceStore
     inferences: _InferenceStore
     snapshots: _SnapshotStore
+    revisions: _RevisionStore
 
     def __init__(self, database: MemoryDatabase) -> None:
         self._database = database
@@ -322,6 +346,7 @@ class MemoryUnitOfWork:
         self.evidence = _EvidenceStore(self._working)
         self.inferences = _InferenceStore(self._working)
         self.snapshots = _SnapshotStore(self._working)
+        self.revisions = _RevisionStore(self._working)
         return self
 
     def __exit__(self, *exc_info: object) -> bool | None:
@@ -342,6 +367,7 @@ class MemoryUnitOfWork:
         self.evidence = _EvidenceStore(self._working)
         self.inferences = _InferenceStore(self._working)
         self.snapshots = _SnapshotStore(self._working)
+        self.revisions = _RevisionStore(self._working)
 
 
 class MemoryDatabase:

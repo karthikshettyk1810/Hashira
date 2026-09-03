@@ -39,6 +39,7 @@ from hashira.core import (
     Origin,
     Relationship,
     RelationshipType,
+    Revision,
     Snapshot,
     SnapshotStatus,
     SourceRef,
@@ -449,6 +450,65 @@ def test_snapshot_list_orders_newest_first(uow_factory: UowFactory) -> None:
     with uow_factory() as uow:
         listed = uow.snapshots.list(system.id)
         assert [s.id for s in listed] == [newer.id, older.id]
+
+
+# --- revisions: the ancestry `application.history.query_at_revision` reads ---
+
+
+def test_revision_record_and_get(uow_factory: UowFactory) -> None:
+    system = System(name="s", slug="s-revision-record")
+    revision = Revision(system_id=system.id, sha="abc123", parent_shas=("root",))
+    with uow_factory() as uow:
+        uow.systems.save(system)
+        uow.revisions.record([revision])
+        uow.commit()
+
+    with uow_factory() as uow:
+        got = uow.revisions.get(system.id, "abc123")
+        assert got is not None
+        assert got.parent_shas == ("root",)
+        assert uow.revisions.get(system.id, "never-recorded") is None
+
+
+def test_revision_record_is_idempotent_on_system_and_sha(uow_factory: UowFactory) -> None:
+    """A sha's ancestry never changes once observed — a later `record()` call
+    for the same `(system_id, sha)` must not overwrite it."""
+    system = System(name="s", slug="s-revision-idempotent")
+    first = Revision(system_id=system.id, sha="abc123", parent_shas=("root",), message="first")
+    again = Revision(system_id=system.id, sha="abc123", parent_shas=("root",), message="second")
+    with uow_factory() as uow:
+        uow.systems.save(system)
+        uow.revisions.record([first])
+        uow.commit()
+
+    with uow_factory() as uow:
+        uow.revisions.record([again])
+        uow.commit()
+
+    with uow_factory() as uow:
+        got = uow.revisions.get(system.id, "abc123")
+        assert got is not None
+        assert got.message == "first"
+
+
+def test_revision_find_returns_every_revision_for_a_system(uow_factory: UowFactory) -> None:
+    system_a = System(name="a", slug="s-revision-find-a")
+    system_b = System(name="b", slug="s-revision-find-b")
+    with uow_factory() as uow:
+        uow.systems.save(system_a)
+        uow.systems.save(system_b)
+        uow.revisions.record(
+            [
+                Revision(system_id=system_a.id, sha="a1"),
+                Revision(system_id=system_a.id, sha="a2", parent_shas=("a1",)),
+                Revision(system_id=system_b.id, sha="b1"),
+            ]
+        )
+        uow.commit()
+
+    with uow_factory() as uow:
+        found = {r.sha for r in uow.revisions.find(system_a.id)}
+        assert found == {"a1", "a2"}
 
 
 # --- the §30 guarantee: a failed run cannot corrupt the last known-good state ---

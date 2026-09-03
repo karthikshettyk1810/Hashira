@@ -81,12 +81,24 @@ doesn't surface, is unchanged**: `NEW` with no lineage, exactly as before —
 this is an addition, not a replacement of the old behavior's safety.
 
 None of this is unsafe — nothing is silently merged, overwritten, or deleted.
+
+## Revision ancestry, now recorded
+
+Each `git.commit` observation a history adapter reports carries that commit's
+parent shas. `_extract_revisions` turns those into `core.revisions.Revision`
+records and persists them via `uow.revisions.record(...)` in the same
+transaction as everything else — so ancestry accumulates across runs exactly
+as commits are reported (only the range between the last indexed revision and
+this one, per the Git rename section above). `application.history` reads
+them back to answer revision-scoped queries (`query_at_revision`); this
+module itself does not query them.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -97,6 +109,7 @@ from ..core.events import Event
 from ..core.evidence import Evidence, Inference, Observation
 from ..core.ids import SystemID
 from ..core.relationships import Relationship
+from ..core.revisions import Revision
 from ..core.schema import IR_VERSION
 from ..core.snapshots import Snapshot, SnapshotStatistics
 from ..identity import GitRename
@@ -197,6 +210,7 @@ class IndexingService:
             errors.extend(addition.errors)
 
         renames: list[GitRename] = []
+        revisions: list[Revision] = []
         for history_adapter in self._history_adapters:
             history = history_adapter.extract(
                 root,
@@ -209,6 +223,7 @@ class IndexingService:
             all_events.extend(history.events)
             errors.extend(history.errors)
             renames.extend(_extract_renames(history.observations))
+            revisions.extend(_extract_revisions(history.observations, system_id=system_id))
 
         run = self._normalize(all_observations, system_id=system_id, revision=revision)
 
@@ -224,6 +239,7 @@ class IndexingService:
                 evidence=all_evidence,
                 events=all_events,
                 renames=renames,
+                revisions=revisions,
                 unresolved_count=len(run.unresolved),
                 files_processed=files_processed,
                 errors=errors,
@@ -253,6 +269,7 @@ class IndexingService:
         evidence: list[Evidence],
         events: list[Event],
         renames: list[GitRename],
+        revisions: list[Revision],
         unresolved_count: int,
         files_processed: int,
         errors: list[str],
@@ -322,6 +339,8 @@ class IndexingService:
         uow.evidence.record(evidence)
         if events:
             uow.events.append_many(events)
+        if revisions:
+            uow.revisions.record(revisions)
         uow.graph.upsert_entities([*resolved_entities, *superseded_entities])
         uow.graph.upsert_relationships([*to_insert, *lineage_relationships])
         if stale_ids:
@@ -410,3 +429,34 @@ def _extract_renames(observations: Sequence[Observation]) -> list[GitRename]:
                 GitRename(old_path=old_path, new_path=new_path, similarity=float(similarity))
             )
     return renames
+
+
+def _extract_revisions(
+    observations: Sequence[Observation], *, system_id: SystemID
+) -> list[Revision]:
+    """Pull `Revision` ancestry records out of a `HistoryAdapter`'s raw
+    ``git.commit`` observations — the shape `core.revisions.RevisionGraph`
+    actually wants, decoupled from any one adapter's payload dict layout
+    (mirrors `_extract_renames` above)."""
+    revisions: list[Revision] = []
+    for obs in observations:
+        if obs.kind != "git.commit":
+            continue
+        sha = obs.payload.get("sha")
+        parent_shas = obs.payload.get("parent_shas")
+        if not isinstance(sha, str) or not isinstance(parent_shas, list):
+            continue
+        authored_at = obs.payload.get("authored_at")
+        message = obs.payload.get("message")
+        revisions.append(
+            Revision(
+                system_id=system_id,
+                sha=sha,
+                parent_shas=tuple(p for p in parent_shas if isinstance(p, str)),
+                authored_at=(
+                    datetime.fromisoformat(authored_at) if isinstance(authored_at, str) else None
+                ),
+                message=message if isinstance(message, str) else None,
+            )
+        )
+    return revisions

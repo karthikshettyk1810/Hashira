@@ -26,6 +26,7 @@ from ...core.enums import EntityType, RelationshipType, SnapshotStatus
 from ...core.events import Event
 from ...core.evidence import Evidence, Inference, Observation
 from ...core.relationships import Relationship
+from ...core.revisions import Revision
 from ...core.snapshots import Snapshot
 from . import schema
 
@@ -35,6 +36,7 @@ __all__ = [
     "SqliteGraphRepository",
     "SqliteInferenceStore",
     "SqliteObservationStore",
+    "SqliteRevisionStore",
     "SqliteSnapshotStore",
     "SqliteSystemRepository",
     "SqliteUnitOfWork",
@@ -43,10 +45,11 @@ __all__ = [
 _M = TypeVar("_M", bound=BaseModel)
 
 _REVISION_QUERY_UNSUPPORTED = (
-    "revision-scoped queries need Git revision ordering, which does not exist "
-    "yet (see docs/IR.md#identity-resolution-10--status and ROADMAP.md Phase 2); "
-    "omit `revision` and use `at` for wall-clock-in-time queries instead of "
-    "returning a silently wrong answer about the past"
+    "this port does not do revision-scoped querying natively; use "
+    "hashira.application.history.query_at_revision(uow, ...) instead, which "
+    "answers it correctly today by filtering the current graph against "
+    "recorded revision ancestry -- see that module's docstring. Omitting "
+    "`revision` here or using `at` for wall-clock time both still work."
 )
 
 
@@ -479,6 +482,39 @@ class SqliteSnapshotStore:
         return [_load(Snapshot, row) for row in rows]
 
 
+class SqliteRevisionStore:
+    def __init__(self, conn: Connection) -> None:
+        self._conn = conn
+
+    def record(self, revisions: Iterable[Revision]) -> Sequence[Revision]:
+        saved = list(revisions)
+        if saved:
+            stmt = sqlite_insert(schema.revisions).on_conflict_do_nothing(
+                index_elements=["system_id", "sha"]
+            )
+            self._conn.execute(
+                stmt,
+                [{"system_id": r.system_id, "sha": r.sha, "data": _dump(r)} for r in saved],
+            )
+        return saved
+
+    def get(self, system_id: str, sha: str) -> Revision | None:
+        col = schema.revisions.c
+        data = self._conn.execute(
+            sa.select(col.data).where(col.system_id == system_id, col.sha == sha)
+        ).scalar_one_or_none()
+        return _load(Revision, data) if data is not None else None
+
+    def find(self, system_id: str, *, limit: int = 100_000) -> Sequence[Revision]:
+        col = schema.revisions.c
+        rows = (
+            self._conn.execute(sa.select(col.data).where(col.system_id == system_id).limit(limit))
+            .scalars()
+            .all()
+        )
+        return [_load(Revision, row) for row in rows]
+
+
 class SqliteUnitOfWork:
     """One indexing transaction (§30).
 
@@ -499,6 +535,7 @@ class SqliteUnitOfWork:
     evidence: SqliteEvidenceStore
     inferences: SqliteInferenceStore
     snapshots: SqliteSnapshotStore
+    revisions: SqliteRevisionStore
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
@@ -515,6 +552,7 @@ class SqliteUnitOfWork:
         self.evidence = SqliteEvidenceStore(self._conn)
         self.inferences = SqliteInferenceStore(self._conn)
         self.snapshots = SqliteSnapshotStore(self._conn)
+        self.revisions = SqliteRevisionStore(self._conn)
         return self
 
     def __exit__(self, *exc_info: object) -> bool | None:

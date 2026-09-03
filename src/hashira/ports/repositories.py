@@ -16,6 +16,7 @@ from ..core.enums import EntityType, RelationshipType
 from ..core.events import Event
 from ..core.evidence import Evidence, Inference, Observation
 from ..core.relationships import Relationship
+from ..core.revisions import Revision
 from ..core.snapshots import Snapshot
 
 
@@ -156,6 +157,31 @@ class SnapshotStore(Protocol):
 
 
 @runtime_checkable
+class RevisionStore(Protocol):
+    """Revision ancestry (§13): the raw material `core.revisions.RevisionGraph`
+    is built from. Populated from a `HistoryAdapter`'s commit observations by
+    `IndexingService` (`application/indexing.py::_extract_revisions`), and
+    read by `application.history.query_at_revision` to answer "what did the
+    graph look like at revision R" without touching the VCS at query time.
+    """
+
+    def record(self, revisions: Iterable[Revision]) -> Sequence[Revision]:
+        """Idempotent on ``(system_id, sha)``: a revision already known keeps
+        its first-recorded ancestry rather than being overwritten — a given
+        sha's parents never change once observed."""
+        ...
+
+    def get(self, system_id: str, sha: str) -> Revision | None: ...
+
+    def find(self, system_id: str, *, limit: int = 100_000) -> Sequence[Revision]:
+        """Every revision recorded for a system — no filtering. At the scale
+        this exists for today, a caller loads everything and walks the DAG
+        in memory (`RevisionGraph`); pagination is deferred with everything
+        else this milestone is deliberately not optimizing yet."""
+        ...
+
+
+@runtime_checkable
 class UnitOfWork(Protocol):
     """Transactional boundary for an indexing run (§30).
 
@@ -170,6 +196,7 @@ class UnitOfWork(Protocol):
     evidence: EvidenceStore
     inferences: InferenceStore
     snapshots: SnapshotStore
+    revisions: RevisionStore
 
     def __enter__(self) -> UnitOfWork: ...
 

@@ -4,6 +4,13 @@ Nothing below `hashira.ports` may appear here directly — see
 `indexing.py`'s docstring for how `IndexingService` stays language-agnostic.
 """
 
+from .history import HistoricalGraph, query_at_revision
 from .indexing import IndexingResult, IndexingService, Normalizer
 
-__all__ = ["IndexingResult", "IndexingService", "Normalizer"]
+__all__ = [
+    "HistoricalGraph",
+    "IndexingResult",
+    "IndexingService",
+    "Normalizer",
+    "query_at_revision",
+]

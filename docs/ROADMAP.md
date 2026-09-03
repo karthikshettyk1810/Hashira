@@ -58,12 +58,11 @@ Phases per spec §36, annotated with the MVP-scope decision recorded in
       `tests/integration/test_sqlite_storage.py`). A future PostgreSQL
       implementation is held to the exact same suite.
 - [ ] PostgreSQL implementation of every port (hosted/team store).
-- [ ] **Revision-scoped historical queries** (`find_entities(revision=...)`,
-      `get_relationships(revision=...)`) currently raise `NotImplementedError`
-      rather than guess — §13's historical queries need a real Git revision
-      ordering, which nothing produces yet. Closing this is Phase 2 work,
-      once the Git/History adapter exists. `at: datetime` (wall-clock)
-      queries work correctly today via `Relationship.held_at()`.
+- [x] **Revision-scoped historical queries** — `find_entities(revision=...)`
+      and `get_relationships(revision=...)` still raise `NotImplementedError`
+      on both storage ports (correctly: neither backend does this natively
+      yet), but the capability itself now exists one layer up. See the
+      temporal-queries milestone under Phase 2 below.
 
 ## Phase 2 — Python Ecosystem Intelligence (per the MVP scope decision)
 
@@ -178,14 +177,11 @@ core rather than the adapter.
       and no Git-confirmed rename really is gone — not attempted yet, since
       it's easy to get wrong ahead of incremental indexing) and incremental
       indexing itself (skip unchanged files rather than re-deriving and
-      reconciling away nothing every run). Also open: revision-scoped
-      historical queries (`find_entities(revision=...)`) — Git now supplies
-      the raw ancestry data (`CommitInfo.parent_shas`), but answering "was
-      this true at revision X" needs an ancestry index over that data that
-      does not exist yet; the ports still raise `NotImplementedError` there,
-      correctly, rather than guess. Branch/merge-aware indexing semantics
-      remain deliberately out of scope (`changed_paths_in_commit` reports a
-      merge commit's changes relative to its first parent only).
+      reconciling away nothing every run). Branch/merge-aware indexing
+      semantics remain deliberately out of scope (`changed_paths_in_commit`
+      reports a merge commit's changes relative to its first parent only).
+      Revision-scoped historical queries, previously listed here as open,
+      are closed — see below.
 - [x] **Django framework enricher** (`src/hashira/adapters/django/`) — the
       first proof that the graph is genuinely cross-domain, not just a code
       graph with extra steps. Built on Python's own observations, not a
@@ -231,6 +227,68 @@ core rather than the adapter.
     resolving `include()`'d URL confs across files (a route whose target
     doesn't resolve stays an `INTERFACE` entity with no `EXPOSES` edge,
     correctly, rather than a guess).
+- [x] **Temporal/revision-aware queries** — deliberately built next instead
+      of FastAPI: Django proved *why* the graph exists, Git supplied the raw
+      material for *when* it was true, and the two needed to connect before
+      a second framework arrived. Three pieces, in order:
+  - **Revision ancestry as a core concept, not a Git object** —
+    `core/revisions.py::Revision` (system id, sha, parent shas, provider —
+    the same natural sha string already used everywhere else in the IR, not
+    a second opaque id every caller would have to translate through) and
+    `RevisionGraph` (plain reachability over `parent_shas`: `is_ancestor`,
+    `is_ancestor_or_self`, `ancestry_between`). The core still imports no
+    Git; `IndexingService` populates `Revision` records from a
+    `HistoryAdapter`'s `git.commit` observations
+    (`application/indexing.py::_extract_revisions`) and persists them via a
+    new `RevisionStore` port, backed on both storage backends and held to
+    the same shared conformance suite as every other port.
+  - **Snapshots stay exactly what they already were**: a named cut point
+    over revision-keyed validity, not a second source of truth
+    (`Snapshot.revision` already identified the point in history; nothing
+    about that needed to change — see IR.md's temporal design note, which
+    this milestone confirmed rather than revised).
+  - **Historical query, kept deliberately boring**:
+    `application/history.py::query_at_revision` loads the *current*,
+    fully-materialized graph and filters it against each entity's/edge's
+    revision-keyed validity using real ancestry, not string equality or
+    wall-clock time — "materialize the snapshot for that revision" means
+    "compute this filtered view on demand," not "store a second copy of the
+    graph per revision." `revision=None` means today, exactly what the
+    ordinary (non-historical) ports already return. Superseded entities are
+    tracked correctly even though `Entity` itself never records *when* a
+    supersession happened (`identity/resolver.py::apply`'s `SUPERSEDES`
+    branch flips status but leaves `last_seen_revision` alone) — the
+    lineage `Relationship`'s own `valid_from_revision` is the only record of
+    that moment, so the query reads it from there.
+  - **The brutal integration test** (`tests/integration/test_temporal_queries.py`):
+    a real Git history (commits A–D) over the Django fixture, where a
+    structural edit at C breaks the `Payment.status` impact chain
+    (`CheckoutView.post` stops calling the service) and a route change at D
+    must not leak backwards — `query_at_revision(..., revision=A)` shows the
+    old full chain, `revision=C` and `revision=None` (today) both show the
+    broken one, and D's new route is invisible at every earlier revision. A
+    second test drives the existing rename-lineage scenario
+    (`payments/services.py` → a new `billing/` package) across three
+    revisions plus an unrelated *disguised* rename in the same history,
+    proving `query_at_revision` shows the pre-rename entity only before the
+    move, the post-rename entity (with its `GIT_RENAME` claim and
+    `SUPERSEDES` edge intact) only from the move onward, and still refuses
+    to link the disguised case at any revision — the revision-query layer
+    does not launder a bad merge into looking legitimate just because time
+    passed.
+  - **A real bug found and fixed while building the second test**: filtering
+    relationships to "both endpoints present at this revision" silently
+    dropped every `SUPERSEDES` lineage edge the moment a query reached or
+    passed the revision it was minted at — because a lineage edge's entire
+    purpose is to point from a currently-present entity back at one that, by
+    definition, is not. Fixed in `application/history.py::_bounded` by
+    exempting `SUPERSEDES` from the target-presence check.
+  - **Deliberately not built**: event sourcing, a temporal SQL abstraction
+    layer, branch-aware semantic merging, CRDT-like graph reconciliation,
+    incremental indexing, a storage-native/indexed implementation of
+    `find_entities(revision=...)` itself (still `NotImplementedError` on
+    both backends — reserved for when this needs to run faster than "load
+    the whole graph and filter it in Python"), and the FastAPI adapter.
 - [ ] Celery async enricher — reads a target Celery app; tasks → `PROCESS`,
       queues → `MESSAGE_CHANNEL`.
 - [ ] Postgres data adapter, from migrations/schema (§21: "do not make vector

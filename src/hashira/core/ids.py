@@ -40,6 +40,7 @@ class IDPrefix(StrEnum):
     INCIDENT = "inc"
     DEPLOYMENT = "dep"
     INDEX_RUN = "idx"
+    REVISION = "rev"
 
 
 def _encode_ulid(timestamp_ms: int, randomness: bytes) -> str:
@@ -92,6 +93,7 @@ ChangeID = Annotated[str, _typed(IDPrefix.CHANGE)]
 IncidentID = Annotated[str, _typed(IDPrefix.INCIDENT)]
 DeploymentID = Annotated[str, _typed(IDPrefix.DEPLOYMENT)]
 IndexRunID = Annotated[str, _typed(IDPrefix.INDEX_RUN)]
+RevisionID = Annotated[str, _typed(IDPrefix.REVISION)]
 
 
 def system_uri(system_id: str) -> str:

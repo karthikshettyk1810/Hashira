@@ -33,6 +33,7 @@ from .evidence import Evidence, Inference, Observation
 from .ids import IDPrefix, entity_uri, new_id, parse_id, system_uri
 from .incidents import CausalHypothesis, Incident
 from .relationships import IMPACT_EDGES, INVERSE, Relationship
+from .revisions import Revision, RevisionGraph
 from .schema import (
     ADAPTER_CONTRACT_VERSION,
     EVENT_SCHEMA_VERSION,
@@ -82,6 +83,8 @@ __all__ = [
     "Origin",
     "Relationship",
     "RelationshipType",
+    "Revision",
+    "RevisionGraph",
     "RiskAssessment",
     "Snapshot",
     "SnapshotStatistics",

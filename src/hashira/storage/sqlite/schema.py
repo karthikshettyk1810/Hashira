@@ -132,3 +132,15 @@ snapshots = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, index=True),
     sa.Column("data", sa.JSON, nullable=False),
 )
+
+#: Revision ancestry (§13). Keyed by `(system_id, sha)` rather than the
+#: record's own opaque id -- callers look these up by the natural VCS
+#: identifier already used everywhere else (`Entity.first_seen_revision`,
+#: `Relationship.valid_from_revision`, `Snapshot.revision`), never by id.
+revisions = sa.Table(
+    "revisions",
+    metadata,
+    sa.Column("system_id", sa.String, primary_key=True),
+    sa.Column("sha", sa.String, primary_key=True),
+    sa.Column("data", sa.JSON, nullable=False),
+)
