@@ -45,6 +45,11 @@ packages = ["src/hashira"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+# tests/fixtures holds fixture *repositories* indexed by our tests -- not
+# tests themselves. Without this, its own tests/ subpackage collides on
+# import with this project's top-level tests/ package (both would be
+# imported as `tests.test_checkout`, etc).
+norecursedirs = ["fixtures", ".venv", "*.egg-info", "build", "dist"]
 markers = [
   "contract: locks a public contract; a failure means a schema version bump is required",
 ]
@@ -52,6 +57,9 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Fixture repositories are sample data indexed by tests, not code this
+# project's style rules govern -- see pytest's matching `norecursedirs`.
+extend-exclude = ["tests/fixtures"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

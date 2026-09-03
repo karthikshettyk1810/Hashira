@@ -33,9 +33,11 @@ Phases per spec §36, annotated with the MVP-scope decision recorded in
       20 tests in `tests/unit/test_identity.py`. See
       [IR.md's status section](IR.md#identity-resolution-10--status) for the
       policy and what is still open.
-- [ ] The **adversarial fixture suite** against real renames/extract-method/
-      module-reorg diffs — deferred to Phase 2, once the Python language
-      adapter exists to produce real candidates to feed the ladder.
+- [x] The **adversarial fixture suite** against real renames/extract-method/
+      module-reorg diffs — pulled forward rather than deferred, immediately
+      after the Python language adapter landed (`tests/integration/test_python_indexing.py`,
+      against `tests/fixtures/python_basic/`). It found real, honest gaps the
+      ladder-only design couldn't have surfaced on its own — see Phase 2.
 - [x] **SQLite implementation of every port** (local-first default) —
       `src/hashira/storage/sqlite/`. One JSON-per-record column plus indexed
       filter columns (schema.py); every port backed by a live
@@ -84,9 +86,45 @@ if `INTERFACE`/`DATA_ENTITY`/`PROCESS` only ever show up *with* a framework
 adapter attached, something has leaked framework-specific assumptions into the
 core rather than the adapter.
 
-- [ ] Git adapter (repository discovery, commit/rename history, revisions).
-- [ ] Python language adapter (AST/tree-sitter-based symbol and import
-      extraction) — must stand alone against a plain-Python fixture repo.
+- [x] **Python language adapter** (`src/hashira/adapters/python/`) — stdlib
+      `ast`, not tree-sitter (see [ADAPTERS.md](ADAPTERS.md#python-adapter)
+      for why). Stands alone against a plain-Python fixture repo
+      (`tests/fixtures/python_basic/`), with zero framework assumptions:
+      modules, classes, functions, methods, async functions, imports,
+      calls, inheritance and decorators, each carrying source location and
+      evidence. Best-effort call/base-class resolution (`self.`/local-var/
+      import/module-local) stays syntax-only and never invents an entity for
+      something it cannot confirm — see `adapters/python/resolve.py`.
+- [x] **`IndexingService`** (`src/hashira/application/indexing.py`) — wires
+      adapter → normalizer → identity resolution → storage as one
+      transaction, language-agnostic by construction (a `Normalizer`
+      Protocol, not an import of the Python one). This is the piece that
+      actually exercises the §30 guarantee end to end, not just at the
+      storage layer.
+- [x] **The adversarial identity suite ran, and found real gaps** — not
+      hypothetical ones. Confirmed by `tests/integration/test_python_indexing.py`
+      against real file mutations:
+  - Unchanged-file re-indexing produces `SUPERSEDES`, not `MATCHED` — expected,
+    per the identity ladder's own policy (`QUALIFIED_NAME` alone is
+    corroborating-tier, never enough alone to merge).
+  - **A rename produces plain `NEW` with *no* lineage at all**, and the old
+    entity is left `ACTIVE` and orphaned — worse than originally assumed
+    (`SUPERSEDES` was expected; the honest result is *no connection
+    recorded*, since a rename changes the only signal available). See
+    `adapters/python/normalizer.py`'s "known, deliberate limitation" section.
+  - **Stale relationships are never retracted** — a CALLS/IMPORTS/EXTENDS
+    edge not re-observed this run stays `is_current` forever, since nothing
+    calls `close_relationships()` yet.
+  - Structural similarity (copy/paste, extracted methods) correctly never
+    creates a false connection — confirmed, not just asserted by the resolver
+    unit tests.
+  - Two existing entities sharing a qualified name correctly produce
+    `AMBIGUOUS` (a `SPECULATIVE` `HYPOTHESIS`), never a guessed pick.
+- [ ] **Close the rename/staleness gap**: Git adapter (repository discovery,
+      commit/rename history, revisions) supplying `GIT_RENAME` identity
+      claims, plus incremental indexing that closes stale relationships and
+      detects real removal. This is now the most concretely justified next
+      step in this phase — not a guess about what might matter later.
 - [ ] Django framework enricher — reads a target Django app; views/URLs →
       `INTERFACE`, models → `DATA_ENTITY`. Ships as one adapter among several
       `FrameworkAdapter` implementations, not as a Hashira dependency.
@@ -95,8 +133,6 @@ core rather than the adapter.
 - [ ] Postgres data adapter, from migrations/schema (§21: "do not make vector
       search the source of truth" applies here too — schema facts come from
       migrations, not inference).
-- [ ] Incremental indexing: a changed file invalidates only affected
-      observations (§19).
 - [ ] TypeScript language adapter (structural only, to prove IR portability
       per §42 — deferred relative to the original §35 sequencing).
 
@@ -149,26 +185,33 @@ core rather than the adapter.
 Gates Phase 7. Copied here so it stays visible against the phase list above:
 
 - [x] System IR schema is versioned and validated.
-- [ ] Core entities/relationships are stable enough for external consumers
-      (needs real adapter usage to prove, not just the contract tests).
+- [x] Core entities/relationships are stable enough for a real adapter — the
+      Python adapter's entire extraction (§8's MODULE/SYMBOL, §11's
+      DEFINES/IMPORTS/CALLS/EXTENDS) needed zero core changes beyond the
+      `IdentityClaimKind` tightening in 0.1.1. Still needs a *second* language
+      adapter to prove it wasn't Python-shaped by accident.
 - [x] Provenance is mandatory for derived knowledge (enforced in
       `core/evidence.py`, `core/relationships.py`).
 - [x] Events are immutable and idempotent (enforced in `core/events.py` and
       proven at the persistence layer by the shared conformance suite against
       both storage backends).
-- [ ] Snapshots are reproducible (needs the indexer; storage and the model
-      both support it — `SqliteSnapshotStore`/`MemoryDatabase` round-trip a
-      `Snapshot` and `latest_complete()` correctly ignores non-`COMPLETE`
-      ones, but nothing produces a real snapshot from source yet).
-- [ ] Incremental indexing works.
+- [x] Snapshots are reproducible from source — `IndexingService` produces a
+      real `COMPLETE` snapshot from an actual repository now, not just a
+      round-tripped record (`SqliteSnapshotStore`/`MemoryDatabase`,
+      `latest_complete()` correctly ignoring non-`COMPLETE` ones).
+- [ ] Incremental indexing works (confirmed *not* working yet, precisely —
+      see Phase 2's adversarial-suite findings — rather than merely unbuilt).
 - [ ] At least two language ecosystems map into the same semantic model.
 - [x] SQLite persistence can rebuild a graph without vendor lock-in — the
-      port is the only thing an indexer talks to (`src/hashira/storage/sqlite/`).
+      port is the only thing an indexer talks to (`src/hashira/storage/sqlite/`),
+      confirmed by running the identical Python-adapter pipeline against both
+      `SqliteDatabase` and `MemoryDatabase` with zero adapter-side changes.
 - [ ] The same is true of a PostgreSQL implementation, once it exists.
 - [ ] CLI and JSON APIs can query the same domain services.
 - [ ] MCP can expose read-only intelligence without modifying core.
 - [x] Tests cover identity, temporal, provenance and graph invariants
-      (`tests/unit/`, `tests/contract/`) — will grow as the resolution ladder
-      and real stores land.
-- [ ] Documentation includes adapter and extension rules (this set of docs is
-      the start; needs a worked example once an adapter exists).
+      (`tests/unit/`, `tests/contract/`, `tests/integration/`) — 204 tests as
+      of the Python adapter landing, including the adversarial identity suite
+      against a real fixture repository, not just the resolver in isolation.
+- [x] Documentation includes adapter and extension rules — `ADAPTERS.md` now
+      has a worked example (the Python adapter) rather than only a plan.

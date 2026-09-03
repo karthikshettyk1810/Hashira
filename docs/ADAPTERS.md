@@ -95,11 +95,65 @@ gap in the graph.
    specific `files` sequence, not "the whole repository," so a one-line
    commit does not force a full re-index (§4, §19).
 
-## First adapter target (per the MVP scope decision in ARCHITECTURE.md)
+## Python adapter
 
-Python language adapter + Django/Celery framework adapter + a
-migrations-or-schema-based Postgres data adapter, over Git. This is the set
-needed to produce the §40 example end to end in one stack, which is the
-actual proof of the cross-domain graph — before a second language adapter is
-added to prove IR portability (§42's "at least two language ecosystems map
-into the same semantic model").
+`src/hashira/adapters/python/` — the first adapter, and so far the only one.
+Understands plain Python only; no framework knowledge (§18's separation
+holds structurally: nothing here imports Django, FastAPI, or anything else).
+
+**Parser choice: stdlib `ast`, not tree-sitter.** `ast` alone gives modules,
+classes, functions, methods, async functions, imports, calls, inheritance,
+decorators and precise source locations — everything on the extraction list
+below — without a second parser dependency. Tree-sitter earns its place once
+Hashira is indexing several languages through one grammar-agnostic interface;
+adding it for Python alone, before that need exists, would be solving a
+problem this project doesn't have yet.
+
+**Pipeline** (also see `hashira.application.indexing`'s module docstring):
+
+```
+discovery.py   -> which files, and each file's import root (src/ layout aware)
+extractor.py   -> one file's AST -> Observation[] + Evidence[]   (Stage 1)
+resolve.py     -> pure, syntax-only "what might this name refer to?"
+normalizer.py  -> the whole run's Observations -> candidate Entity/Relationship (Stage 2)
+adapter.py     -> PythonAdapter: the LanguageAdapter port, satisfied
+```
+
+Stage 1 (one file) and Stage 2 (the whole run) are deliberately separate.
+Stage 1 can only guess at what a call target is — it has no visibility into
+other files. Stage 2 is what actually *checks* a guess against every entity
+this run produced, before letting it become a `Relationship`. A guess Stage 2
+cannot confirm stays exactly what it was: an `Observation`, never a fabricated
+entity or a fabricated edge (§10's "uncertainty is data, not failure",
+enforced as a hard adapter rule, not a suggestion — see `resolve.py`'s and
+`normalizer.py`'s docstrings for the full reasoning).
+
+**Resolution kinds**, ranked by how much a single one is worth trusting
+(`resolve.py`): `SELF` (`self.foo`, one attribute level only) and
+`LOCAL_INSTANCE` (`x = Cls(); x.method()`, tracked per-function) are the
+strongest, followed by `IMPORT` and `MODULE_LOCAL`; anything not covered by
+these is `UNRESOLVED` and stays an observation forever, never promoted.
+
+**A known, deliberate limitation**, found by the adversarial identity suite
+(`tests/integration/test_python_indexing.py`) rather than assumed up front:
+without a Git adapter, `QUALIFIED_NAME` is the only identity signal this
+adapter can honestly offer, and per the identity ladder's own policy that is
+never enough alone for a `MATCHED` merge. The practical result — a rename
+produces a disconnected `NEW` entity with the old one orphaned, and every
+re-index adds a fresh `SUPERSEDES` link to every unchanged symbol — is fully
+documented in `adapters/python/normalizer.py` and
+`application/indexing.py`. It is safe (nothing silently merges or vanishes)
+but is exactly why the Git/History adapter is next, not a nice-to-have.
+
+## Second adapter target (per the MVP scope decision in ARCHITECTURE.md)
+
+Git adapter (rename evidence, closing the gap above) + Django/Celery
+framework enrichers + a migrations-or-schema-based Postgres data adapter.
+This is the set needed to produce the §40 example end to end in one stack —
+the Python adapter alone already produces most of it (see the worked example
+in `tests/integration/test_python_indexing.py`); Django/Celery/Postgres are
+what turn `INTERFACE`/`DATA_ENTITY`/`MESSAGE_CHANNEL` from "the Python
+adapter's plain SYMBOL/MODULE types" into the framework-aware semantics §18
+describes — before a second *language* adapter is added to prove IR
+portability (§42's "at least two language ecosystems map into the same
+semantic model").
