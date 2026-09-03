@@ -1,0 +1,419 @@
+"""`application.impact`: reverse/forward traversal mechanics, explainable
+paths, per-hop (never per-path) epistemic state, and identity-lineage-aware
+resolution -- against hand-built graphs, independent of any adapter.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from hashira.application.history import query_at_revision
+from hashira.application.impact import (
+    ImpactAnalyzer,
+    forward_impact,
+    resolve_identity,
+    reverse_impact,
+)
+from hashira.core import (
+    Confidence,
+    Entity,
+    EntityStatus,
+    EntityType,
+    Evidence,
+    KnowledgeClass,
+    Origin,
+    Relationship,
+    RelationshipType,
+    SourceRef,
+    System,
+)
+from hashira.storage.memory import MemoryDatabase
+
+
+@pytest.fixture
+def db() -> MemoryDatabase:
+    return MemoryDatabase()
+
+
+@pytest.fixture
+def system(db: MemoryDatabase) -> System:
+    system = System(name="Checkout", slug="checkout-impact")
+    with db.unit_of_work() as uow:
+        uow.systems.save(system)
+        uow.commit()
+    return system
+
+
+def _entity(system: System, name: str, *, type: EntityType = EntityType.SYMBOL) -> Entity:
+    return Entity(system_id=system.id, type=type, name=name, qualified_name=name)
+
+
+def _evidence(system: System) -> Evidence:
+    return Evidence(
+        system_id=system.id,
+        origin=Origin.STATIC_ANALYSIS,
+        source=SourceRef(provider="python-ast", reference="app.py"),
+        summary="observed",
+        locator="app.py:1",
+    )
+
+
+def _rel(
+    system: System,
+    source: Entity,
+    target: Entity,
+    type: RelationshipType,
+    *,
+    evidence: Evidence | None = None,
+    confidence: Confidence | None = None,
+    knowledge_class: KnowledgeClass = KnowledgeClass.OBSERVATION,
+    origin: Origin = Origin.STATIC_ANALYSIS,
+) -> Relationship:
+    return Relationship(
+        system_id=system.id,
+        source_entity_id=source.id,
+        target_entity_id=target.id,
+        type=type,
+        origin=origin,
+        knowledge_class=knowledge_class,
+        confidence=confidence,
+        evidence_ids=[evidence.id] if evidence else [],
+    )
+
+
+def _seed(
+    db: MemoryDatabase,
+    system: System,
+    entities: list[Entity],
+    relationships: list[Relationship],
+    evidence: list[Evidence] | None = None,
+) -> None:
+    with db.unit_of_work() as uow:
+        uow.graph.upsert_entities(entities)
+        uow.graph.upsert_relationships(relationships)
+        if evidence:
+            uow.evidence.record(evidence)
+        uow.commit()
+
+
+# --- basic traversal mechanics ----------------------------------------------
+
+
+def test_reverse_impact_walks_backward_through_impact_edges(
+    db: MemoryDatabase, system: System
+) -> None:
+    """route --EXPOSES--> handler --CALLS--> service --WRITES--> field"""
+    route = _entity(system, "route", type=EntityType.INTERFACE)
+    handler = _entity(system, "handler")
+    service = _entity(system, "service")
+    field = _entity(system, "field")
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [route, handler, service, field],
+        [
+            _rel(system, route, handler, RelationshipType.EXPOSES, evidence=ev),
+            _rel(system, handler, service, RelationshipType.CALLS, evidence=ev),
+            _rel(system, service, field, RelationshipType.WRITES, evidence=ev),
+        ],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=field.id)
+
+    assert {e.id for e in result.affected_entities} == {handler.id, service.id, route.id}
+    assert result.direction == "reverse"
+    assert result.start.id == field.id
+
+
+def test_forward_impact_walks_the_opposite_direction(db: MemoryDatabase, system: System) -> None:
+    a = _entity(system, "a")
+    b = _entity(system, "b")
+    c = _entity(system, "c")
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [a, b, c],
+        [
+            _rel(system, a, b, RelationshipType.CALLS, evidence=ev),
+            _rel(system, b, c, RelationshipType.WRITES, evidence=ev),
+        ],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = forward_impact(uow, system_id=system.id, entity_id=a.id)
+
+    assert {e.id for e in result.affected_entities} == {b.id, c.id}
+    assert result.direction == "forward"
+
+
+def test_structural_edges_are_not_walked_by_default(db: MemoryDatabase, system: System) -> None:
+    module = _entity(system, "module", type=EntityType.MODULE)
+    cls = _entity(system, "module.Class")
+    ev = _evidence(system)
+    defines = _rel(system, module, cls, RelationshipType.DEFINES, evidence=ev)
+    _seed(db, system, [module, cls], [defines], [ev])
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=cls.id)
+
+    assert result.affected_entities == ()
+
+
+def test_edge_types_can_be_overridden(db: MemoryDatabase, system: System) -> None:
+    a = _entity(system, "a")
+    b = _entity(system, "b")
+    ev = _evidence(system)
+    _seed(db, system, [a, b], [_rel(system, a, b, RelationshipType.CALLS, evidence=ev)], [ev])
+
+    with db.unit_of_work() as uow:
+        result = forward_impact(
+            uow,
+            system_id=system.id,
+            entity_id=a.id,
+            edge_types=frozenset({RelationshipType.IMPORTS}),
+        )
+
+    assert result.affected_entities == ()
+
+
+def test_a_cycle_does_not_loop_forever(db: MemoryDatabase, system: System) -> None:
+    a = _entity(system, "a")
+    b = _entity(system, "b")
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [a, b],
+        [
+            _rel(system, a, b, RelationshipType.CALLS, evidence=ev),
+            _rel(system, b, a, RelationshipType.CALLS, evidence=ev),
+        ],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=a.id)
+
+    assert {e.id for e in result.affected_entities} == {b.id}
+
+
+def test_unknown_entity_raises(db: MemoryDatabase, system: System) -> None:
+    with db.unit_of_work() as uow, pytest.raises(KeyError):
+        reverse_impact(uow, system_id=system.id, entity_id="ent_nonexistent")
+
+
+# --- explainable paths -------------------------------------------------------
+
+
+def test_path_carries_the_full_relationship_and_resolved_evidence(
+    db: MemoryDatabase, system: System
+) -> None:
+    a = _entity(system, "a")
+    b = _entity(system, "b")
+    ev = _evidence(system)
+    rel = _rel(system, a, b, RelationshipType.CALLS, evidence=ev, confidence=Confidence.LIKELY)
+    _seed(db, system, [a, b], [rel], [ev])
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=b.id)
+
+    assert len(result.paths) == 1
+    path = result.paths[0]
+    assert len(path.hops) == 1
+    hop = path.hops[0]
+    assert hop.relationship.id == rel.id
+    assert hop.relationship.type is RelationshipType.CALLS
+    assert hop.relationship.confidence is Confidence.LIKELY
+    assert hop.source.id == a.id
+    assert hop.target.id == b.id
+    assert len(hop.evidence) == 1
+    assert hop.evidence[0].id == ev.id
+    assert path.endpoint.id == a.id
+
+
+def test_multi_hop_path_preserves_order_start_to_endpoint(
+    db: MemoryDatabase, system: System
+) -> None:
+    a = _entity(system, "a")
+    b = _entity(system, "b")
+    c = _entity(system, "c")
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [a, b, c],
+        [
+            _rel(system, a, b, RelationshipType.CALLS, evidence=ev),
+            _rel(system, b, c, RelationshipType.WRITES, evidence=ev),
+        ],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=c.id)
+
+    # Every reached entity gets its own path -- b (one hop) and a (two
+    # hops) are both "affected", not just the deepest one.
+    assert {p.endpoint.id for p in result.paths} == {a.id, b.id}
+    path_to_a = next(p for p in result.paths if p.endpoint.id == a.id)
+    assert [hop.relationship.type for hop in path_to_a.hops] == [
+        RelationshipType.WRITES,
+        RelationshipType.CALLS,
+    ]
+
+
+# --- path confidence is per-hop, never a synthesized path score -------------
+
+
+def test_weakest_confidence_is_the_minimum_hop_not_a_blended_score(
+    db: MemoryDatabase, system: System
+) -> None:
+    a = _entity(system, "a")
+    b = _entity(system, "b")
+    c = _entity(system, "c")
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [a, b, c],
+        [
+            _rel(system, a, b, RelationshipType.CALLS, evidence=ev, confidence=Confidence.CERTAIN),
+            _rel(
+                system,
+                b,
+                c,
+                RelationshipType.DEPENDS_ON,
+                evidence=ev,
+                confidence=Confidence.SPECULATIVE,
+                knowledge_class=KnowledgeClass.HYPOTHESIS,
+                origin=Origin.LLM,
+            ),
+        ],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=c.id)
+
+    path_to_a = next(p for p in result.paths if p.endpoint.id == a.id)
+    # Each hop keeps its own confidence -- CERTAIN and SPECULATIVE both
+    # still readable individually.
+    assert [hop.relationship.confidence for hop in path_to_a.hops] == [
+        Confidence.SPECULATIVE,
+        Confidence.CERTAIN,
+    ]
+    assert path_to_a.weakest_confidence is Confidence.SPECULATIVE
+    assert path_to_a.has_speculative_hop is True
+
+    path_to_b = next(p for p in result.paths if p.endpoint.id == b.id)
+    assert path_to_b.has_speculative_hop is True  # the one hop itself is speculative
+
+
+def test_a_path_with_no_speculative_hops_is_not_flagged(db: MemoryDatabase, system: System) -> None:
+    a = _entity(system, "a")
+    b = _entity(system, "b")
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [a, b],
+        [_rel(system, a, b, RelationshipType.CALLS, evidence=ev, confidence=Confidence.LIKELY)],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=b.id)
+
+    assert result.paths[0].has_speculative_hop is False
+
+
+# --- identity-lineage-aware resolution --------------------------------------
+
+
+def test_resolve_identity_returns_the_entity_itself_when_present(
+    db: MemoryDatabase, system: System
+) -> None:
+    a = _entity(system, "a")
+    _seed(db, system, [a], [])
+    with db.unit_of_work() as uow:
+        graph = query_at_revision(uow, system_id=system.id, revision=None)
+    assert resolve_identity(graph, a.id) is not None
+    assert resolve_identity(graph, a.id).id == a.id  # type: ignore[union-attr]
+
+
+def test_resolve_identity_follows_supersedes_lineage(db: MemoryDatabase, system: System) -> None:
+    old = _entity(system, "old").model_copy(
+        update={
+            "status": EntityStatus.SUPERSEDED,
+            "identity_claims": [],
+        }
+    )
+    # A SUPERSEDED entity must carry the claims that justified it (§10);
+    # give it one so construction succeeds.
+    from hashira.core import IdentityClaim, IdentityClaimKind
+
+    old = old.model_copy(
+        update={
+            "identity_claims": [
+                IdentityClaim(
+                    kind=IdentityClaimKind.GIT_RENAME,
+                    value="old->new",
+                    origin=Origin.GIT,
+                    confidence=Confidence.LIKELY,
+                )
+            ]
+        }
+    )
+    new = _entity(system, "new")
+    lineage = Relationship(
+        system_id=system.id,
+        source_entity_id=new.id,
+        target_entity_id=old.id,
+        type=RelationshipType.SUPERSEDES,
+        origin=Origin.DERIVED,
+        knowledge_class=KnowledgeClass.DERIVATION,
+        valid_from_revision="rev2",
+    )
+    _seed(db, system, [old, new], [lineage])
+
+    with db.unit_of_work() as uow:
+        graph = query_at_revision(uow, system_id=system.id, revision=None)
+        resolved = resolve_identity(graph, old.id)
+        assert resolved is not None
+        assert resolved.id == new.id
+
+        # And reverse_impact/forward_impact transparently follow it too.
+        result = reverse_impact(uow, system_id=system.id, entity_id=old.id)
+        assert result.resolved_from == old.id
+        assert result.start.id == new.id
+
+
+def test_resolve_identity_returns_none_for_a_dead_end(db: MemoryDatabase, system: System) -> None:
+    with db.unit_of_work() as uow:
+        graph = query_at_revision(uow, system_id=system.id, revision=None)
+    assert resolve_identity(graph, "ent_nowhere") is None
+
+
+# --- the ImpactAnalyzer convenience wrapper ---------------------------------
+
+
+def test_impact_analyzer_delegates_to_the_module_functions(
+    db: MemoryDatabase, system: System
+) -> None:
+    a = _entity(system, "a")
+    b = _entity(system, "b")
+    ev = _evidence(system)
+    _seed(db, system, [a, b], [_rel(system, a, b, RelationshipType.CALLS, evidence=ev)], [ev])
+
+    with db.unit_of_work() as uow:
+        analyzer = ImpactAnalyzer(uow=uow, system_id=system.id)
+        reverse = analyzer.reverse_impact(b.id)
+        forward = analyzer.forward_impact(a.id)
+
+    assert {e.id for e in reverse.affected_entities} == {a.id}
+    assert {e.id for e in forward.affected_entities} == {b.id}

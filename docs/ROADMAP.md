@@ -465,11 +465,69 @@ core rather than the adapter.
       `--json` for automation.
 - [ ] Query services per §24: `get_entity`, `find_entities`,
       `get_relationships`, `find_dependents`, `find_dependencies`,
-      `trace_path`, `impact_analysis`, `get_history`, `get_snapshot`,
-      `find_incidents`, `find_evidence`, `get_current_state`.
-- [ ] Impact analysis per §25, distinguishing graph reachability from
-      semantic risk (`RiskAssessment` already models this in `core/changes.py`;
-      the traversal engine that populates it does not exist yet).
+      `trace_path`, `get_history`, `get_snapshot`, `find_incidents`,
+      `find_evidence`, `get_current_state` -- `impact_analysis` itself has
+      moved up; see below.
+- [x] **Impact Analysis v0.1** (`src/hashira/application/impact.py`) — the
+      traversal engine §25 needed. Deliberately built *before* the CLI/query-
+      service layer around it: the milestone question was "can Hashira
+      reason over the system it indexed, not merely store it" — deterministic
+      graph reasoning, not LLM reasoning — and that question is answered by
+      the engine existing and being correct, not by how it's exposed.
+  - **`reverse_impact`/`forward_impact`**, both walking
+    `core.relationships.IMPACT_EDGES` (defined since the Django milestone,
+    genuinely used for the first time here) — finally making real the
+    `_reverse_impact` helper every framework-milestone test since Django has
+    been reimplementing by hand (`test_django_identity.py`,
+    `test_fastapi_sqlalchemy_together.py`, ...).
+  - **Explainable paths, not a set of names**: a result is a sequence of
+    `ImpactPath`s, each a sequence of `ImpactHop`s — one per traversed
+    `Relationship`, carrying the entities on both ends and its evidence
+    (resolved once per query, not per hop, via a single batched
+    `uow.evidence.get_many` call). v0.1 keeps exactly one (shortest) path
+    per reached entity, not every path between two entities — a deliberate
+    "boring first" scope, like `application/history.py`'s own.
+  - **Path confidence is not a thing this module invents.** Collapsing a
+    path's several, independently-sourced per-hop confidences into one
+    number would smuggle back the false precision `Confidence`'s ordinal
+    design (§11, `docs/IR.md`) exists to refuse — a CERTAIN hop followed by
+    a SPECULATIVE one must not read as "pretty confident" for the whole
+    path. `ImpactPath.weakest_confidence` is a plain minimum over the
+    *existing* per-hop values, not a synthesized score; every hop's own
+    confidence stays inspectable individually.
+  - **Identity-lineage-aware, as a separate, explicit step.**
+    `resolve_identity` follows `SUPERSEDES` lineage forward so a query about
+    an entity id a later revision superseded (a rename) keeps working
+    instead of silently returning nothing — reported via
+    `ImpactResult.resolved_from`, never folded invisibly into the walk.
+    `SUPERSEDES` itself stays out of `IMPACT_EDGES` on purpose: lineage is
+    not the same claim as "affects".
+  - **The killer integration test**
+    (`tests/integration/test_impact_historical.py`) combines everything
+    built so far — FastAPI, SQLAlchemy, Python, Git, and temporal queries —
+    over real Git history on the `fastapi_checkout` fixture (commits A/B/C).
+    It surfaced a genuine, honest boundary worth documenting rather than
+    working around: a bare attribute-level rename (a column simply renamed,
+    with no corresponding file move) has no Git-backed identity signal to
+    attach today — the same limitation `identity/git_evidence.py` already
+    states for a Python symbol renamed in the same commit as its file. The
+    test instead exercises the rename story that *does* have real evidence
+    behind it (a file move changing a class's qualified name, resolved via
+    existing `GIT_RENAME` lineage) side by side with an entity whose
+    identity is untouched by that same move (a SQLAlchemy column, keyed by
+    `table.field` rather than file path) — proving `resolve_identity` is
+    exercised only where it is actually needed, not applied as a blanket
+    assumption.
+  - **`application/`, not `core/`** — core knows entities, relationships,
+    evidence, revisions, snapshots; this module knows how to traverse those
+    primitives to answer a system question, kept as its own file
+    (`impact.py`) alongside `history.py`, not folded into either core or
+    `IndexingService`.
+  - **Not attempted in this pass**: the CLI/MCP surface above this engine
+    (Phase 3/4, still open), enumerating every path between two entities
+    (only the shortest per reached entity), and any new identity-resolution
+    capability for bare attribute-level renames (a future milestone, not
+    this one — see the killer test's own note above).
 
 ## Phase 4 — Agent integration
 
