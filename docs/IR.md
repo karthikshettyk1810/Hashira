@@ -295,3 +295,74 @@ before the move, the post-rename entity (with its `GIT_RENAME` claim and
 unrelated *disguised* rename in the same history still refused at every
 revision, proving the revision-query layer cannot launder a bad merge into
 looking legitimate just because time passed.
+
+## Identity resolution (§10) — v0.2: declaration-level lineage
+
+["The `GIT_RENAME` gap is now closed, conditionally"](#identity-resolution-10--status)
+above already named the next boundary precisely: Git's rename detection is
+file-level, so a construct renamed *within* a file that itself never moved
+has nothing for that mechanism to detect. This milestone closes that case
+for declarations an adapter can enumerate before and after a change (today,
+SQLAlchemy columns) — not by loosening `GIT_RENAME`'s own file-centric
+design (asked for explicitly: "don't distort it to accommodate symbol-level
+evolution"), but with a new, sibling identity-claim kind.
+
+**`IdentityClaimKind.DECLARATION_LINEAGE`** (`core/enums.py`) sits at
+corroborating tier, next to `GIT_RENAME` and `MIGRATION_LINEAGE` — one hit
+alone justifies `SUPERSEDES` lineage, never an outright merge, the same
+ladder rule every corroborating signal already follows. What is new is
+where the evidence comes from: `GitAdapter` reports a `MODIFIED` file's
+content *before* the change (`git.file_change.old_content`) as a raw fact,
+nothing more; `adapters/sqlalchemy/adapter.py::_detect_declaration_renames`
+re-parses that old content with the adapter's own column extraction and
+compares it to the current source. Only an unambiguous 1:1 disappearance/
+appearance in the same table, with the same type family, becomes a
+`sqlalchemy.declaration_rename` fact; `identity/declaration_evidence.py::
+attach_declaration_lineage_evidence` is what turns an unambiguous fact into
+a claim on both entities, mirroring `git_evidence.py::attach_rename_evidence`'s
+shape exactly, one level down (a declaration inside a file, not a file
+inside a repository).
+
+**Three cases, one discipline.** A clean rename (same type family) resolves
+`SUPERSEDES` with `CERTAIN` or `LIKELY` confidence (matching whether every
+detail — not just the family — agreed). A delete-and-recreate with no
+correspondence signal, or more than one candidate on either side, produces
+no claim at all — the existing, already-correct behavior (an orphaned old
+entity, a disconnected `NEW`) is exactly what happens, unchanged. A rename
+where the type family *also* changed (`String` becoming `Integer`) is
+deliberately treated the same as the second case: the milestone's own
+instruction was explicit — "the system should not automatically conclude
+'same entity because the name changed'" — so no claim is proposed, not a
+weak one. Nothing here is a similarity threshold in disguise: every gate is
+a structural fact (exactly one candidate on each side; the type family
+agrees or it does not), never a score.
+
+**A real bug this surfaced, in code the temporal-queries and impact-analysis
+milestones both already depended on.** `application/indexing.py::
+_reconcile_relationships` fetched *every* outgoing edge of an entity to
+decide what counts as a stale structural edge to close — including
+`SUPERSEDES`, which this run's structural observations never contain (it is
+a one-time historical fact minted once, not a recurring one). Without an
+explicit exclusion, any existing lineage edge read as "no longer observed"
+on the very next, otherwise unrelated re-index and got closed
+(`valid_until_revision` set) — silently erasing lineage that
+`application.history`'s `_bounded` exemption, and `application.impact`'s
+`resolve_identity`, both assume is permanent. The bug had been latent since
+the Git-rename milestone; nothing until this one's three-commit killer test
+(A: rename → B: an unrelated later change) exercised a re-index *after* a
+supersession existed. Fixed by excluding `SUPERSEDES` from reconciliation
+entirely, with a regression test added to `test_git_identity.py` (the
+original mechanism's own home) proving the fix, not just this milestone's
+new one.
+
+Proven end-to-end in `tests/integration/test_identity_evolution.py`, over
+the same combined FastAPI + SQLAlchemy + Git fixture the impact-analysis
+milestone used: `payments.status` renamed to `payments.state` in one commit
+(only the model), the *usage* catching up in a later, separate commit
+(only the service) — deliberately not collapsed into one atomic change,
+because the gap between "identity survived" and "anything actually uses the
+new name yet" is itself the thing worth being able to answer precisely.
+`application.impact.reverse_impact`, asked about the pre-rename id at any
+later revision, transparently follows the lineage and reports exactly what
+was truly reachable at that point — empty, in the gap between the two
+commits; the full chain again, once the usage caught up.

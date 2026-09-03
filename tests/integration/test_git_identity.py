@@ -135,6 +135,56 @@ def test_simple_rename_produces_supersedes_lineage_not_an_orphan(
     assert "shop.payments.PaymentService.process" not in current_calls
 
 
+def test_a_later_unrelated_reindex_does_not_close_the_lineage_edge(
+    repo: Path, db: MemoryDatabase, system: System
+) -> None:
+    """A real bug found while building the Identity Resolution v0.2
+    milestone: `_reconcile_relationships` fetched *every* outgoing edge for
+    reconciliation, including `SUPERSEDES` -- which this run's structural
+    observations never contain, since it is a one-time historical fact, not
+    a recurring one. Without an explicit exclusion, a `SUPERSEDES` edge
+    read as "no longer observed" on the very next, otherwise unrelated
+    re-index and got closed (`valid_until_revision` set), silently erasing
+    lineage that `application.history`/`application.impact` both depend on
+    being permanent. Caught here by doing exactly what no earlier Git-rename
+    test did: index a third time, on an unrelated change, after the rename
+    that created the lineage in the first place."""
+    git_repo = GitRepository(repo)
+    service = _service(db)
+    service.index(repo, system_id=system.id, revision=git_repo.current_revision())
+
+    _git(repo, "mv", "src/shop/payments.py", "src/shop/billing.py")
+    checkout = repo / "src" / "shop" / "checkout.py"
+    checkout.write_text(
+        checkout.read_text().replace("from .payments import", "from .billing import")
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "rename payments to billing")
+    service.index(repo, system_id=system.id, revision=git_repo.current_revision())
+
+    # A third, unrelated change and re-index -- nothing here touches
+    # billing.py/payments.py at all.
+    readme = repo / "README.md"
+    readme.write_text("unrelated change\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "unrelated change")
+    service.index(repo, system_id=system.id, revision=git_repo.current_revision())
+
+    with db.unit_of_work() as uow:
+        entities = uow.graph.find_entities(system.id, limit=10_000)
+        by_qn = {e.qualified_name: e for e in entities}
+        new_module = by_qn["shop.billing"]
+        lineage = [
+            rel
+            for rel in uow.graph.get_relationships(
+                new_module.id, direction="out", types=[RelationshipType.SUPERSEDES]
+            )
+        ]
+    assert len(lineage) == 1
+    assert lineage[0].is_current
+    assert lineage[0].valid_until_revision is None
+
+
 # --- module move: a directory move, not just a same-directory rename -----
 
 

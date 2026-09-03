@@ -22,7 +22,7 @@ from .revisions import Revision
 from .snapshots import Snapshot
 from .state import Deployment, SystemState
 
-IR_VERSION: Final = "0.1.4"
+IR_VERSION: Final = "0.1.5"
 """System IR schema version. Additive changes bump the patch; breaking changes
 bump the minor while 0.x, and require a migration note in docs/IR.md.
 0.1.3: added `Revision` (ancestry record for revision-scoped queries, see
@@ -31,7 +31,12 @@ existing record type changed shape.
 0.1.4: added `RelationshipType.MAPS_TO`/`.REFERENCES` (see `core/enums.py`'s
 docstring for why neither existing type honestly covered an ORM class's
 binding to its table, or a foreign key between two columns) -- additive,
-widens `Relationship.type`'s accepted values only."""
+widens `Relationship.type`'s accepted values only.
+0.1.5: added `IdentityClaimKind.DECLARATION_LINEAGE` (see `core/enums.py`'s
+docstring: an adapter's own before/after declaration comparison, distinct
+from `GIT_RENAME`'s file-level heuristic and `MIGRATION_LINEAGE`'s
+migration-tool record) -- additive, widens `IdentityClaim.kind`'s accepted
+values only."""
 
 ADAPTER_CONTRACT_VERSION: Final = "0.1.1"
 """Adapter protocol version. An adapter declares the range it supports (§31).

@@ -56,18 +56,43 @@ handling should not be refactored into shared plumbing *yet*, only once a
 second adapter's independent needs prove what is actually common (see
 `docs/ROADMAP.md`'s entry on this milestone).
 
+**A column that was renamed *within* an unchanged file is a different
+problem from a file rename, and gets a different mechanism.** Git's own
+rename detection (`identity/git_evidence.py`) has nothing to detect when
+the file never moved -- only its content did. `_detect_declaration_renames`
+re-parses a `MODIFIED` file's content *before* the current revision
+(`GitAdapter` attaches it to `git.file_change` when available) with this
+adapter's own column extraction, and compares old columns to new ones. Only
+an unambiguous 1:1 disappearance/appearance in the same table, with the
+same type family, is reported as a `sqlalchemy.declaration_rename` fact --
+`identity/declaration_evidence.py` is what turns that into a
+`DECLARATION_LINEAGE` claim (the resolver still decides `SUPERSEDES` vs.
+nothing; this adapter never merges anything itself). A name change
+alongside a type-family change (`String` becoming `Integer`, say) is
+deliberately treated as insufficient evidence, not weaker evidence -- see
+that function's own docstring for why "the name looks similar" is not
+something this project's identity model has ever been allowed to trust on
+its own, and this is no exception.
+
 **Out of scope for v0.1**, matching the milestone's explicit "keep it
 narrow": query-shape analysis, sessions/transactions, async SQLAlchemy,
-Alembic migrations, raw SQL, hybrid properties, `relationship(...)`
-construct parsing (SQLAlchemy's own ORM-level association helper -- "deep
-relationship inference" was explicitly excluded; only a column's direct
-`ForeignKey(...)` argument is read), and multi-hop `ForeignKey` chains
-beyond a direct string reference.
+Alembic migrations (`MIGRATION_LINEAGE` stays unused until one exists), raw
+SQL, hybrid properties, `relationship(...)` construct parsing (SQLAlchemy's
+own ORM-level association helper -- "deep relationship inference" was
+explicitly excluded; only a column's direct `ForeignKey(...)` argument is
+read), multi-hop `ForeignKey` chains beyond a direct string reference, a
+table itself being renamed (`__tablename__` changing is treated as a
+different table, not a lineage question, in this pass), and a class *and*
+one of its columns being renamed in the same commit (the class-level and
+declaration-level evidence mechanisms are each conservative on their own;
+stacking two renames at once is deliberately left as a future case, exactly
+like `git_evidence.py`'s existing "path and name both changed" refusal).
 """
 
 from __future__ import annotations
 
 import ast
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -174,6 +199,7 @@ class SQLAlchemyAdapter:
             )
 
         columns_by_model: dict[str, dict[str, str]] = {}  # class_qn -> {field_name: table.column}
+        columns_detail_by_model: dict[str, dict[str, dict[str, object]]] = {}  # + full column dicts
         for class_qn, info in models.items():
             file_rel = str(info["file"])
             tree = trees.get(file_rel)
@@ -185,9 +211,11 @@ class SQLAlchemyAdapter:
             ctx = _augmented_context(index, str(info["module_qn"]), local_names_by_module)
             table_name = str(info["table_name"])
             model_columns: dict[str, str] = {}
+            model_columns_detail: dict[str, dict[str, object]] = {}
             for column in _extract_columns(class_node, ctx):
                 field_name = str(column["field_name"])
                 model_columns[field_name] = f"{table_name}.{field_name}"
+                model_columns_detail[field_name] = column
                 result.observations.append(
                     _emit(
                         result,
@@ -206,6 +234,26 @@ class SQLAlchemyAdapter:
                 )
             if model_columns:
                 columns_by_model[class_qn] = model_columns
+                columns_detail_by_model[class_qn] = model_columns_detail
+
+        for rename in _detect_declaration_renames(
+            base.observations, models, columns_detail_by_model, index, local_names_by_module
+        ):
+            result.observations.append(
+                _emit(
+                    result,
+                    system_id=system_id,
+                    kind="sqlalchemy.declaration_rename",
+                    payload=rename,
+                    summary=(
+                        f"{rename['table_name']}.{rename['old_field_name']} -> "
+                        f"{rename['table_name']}.{rename['new_field_name']}"
+                    ),
+                    file=str(rename["file"]),
+                    line=int(rename["line"]),  # type: ignore[call-overload]
+                    now=now,
+                )
+            )
 
         if columns_by_model:
             for module_qn, file_rel in index.module_file.items():
@@ -405,6 +453,101 @@ def _extract_columns(class_node: ast.ClassDef, ctx: ResolutionContext) -> list[d
             }
         )
     return columns
+
+
+def _base_type_name(text: object) -> str | None:
+    """`"String(20)"` -> `"String"`; `"Integer"` -> `"Integer"`. Used only
+    to decide whether two columns' types are the *same family* -- never a
+    similarity score, just a plain equality check on this one derived
+    string."""
+    if not isinstance(text, str):
+        return None
+    return text.split("(", 1)[0].strip()
+
+
+def _detect_declaration_renames(
+    observations: Sequence[Observation],
+    models: dict[str, dict[str, object]],
+    columns_detail_by_model: dict[str, dict[str, dict[str, object]]],
+    index: PythonIndex,
+    local_names_by_module: dict[str, set[str]],
+) -> list[dict[str, object]]:
+    """For each model whose file was `MODIFIED` (not renamed) since the
+    last indexed revision, re-parse that file's *old* content with the
+    exact same column extraction this adapter already runs on the current
+    source, and compare: which columns disappeared, which appeared.
+
+    A correspondence is only proposed when it is the *only* one possible --
+    exactly one column gone, exactly one arrived, in the same table -- and
+    even then, only when their types agree at the family level (`String`
+    staying `String`, a length or `nullable` change aside). A name change
+    alongside a type-family change is deliberately treated as insufficient
+    evidence (`docs/ROADMAP.md`'s entry on this milestone has the reasoning
+    the user gave for this): "the system should not automatically conclude
+    'same entity because the name changed'". That case, and any case with
+    more than one candidate on either side, produces no fact here at all --
+    `identity.attach_declaration_lineage_evidence` never even sees it, and
+    the resolver's existing, already-correct behavior (an orphaned old
+    entity, a disconnected `NEW`) is exactly what happens instead.
+    """
+    old_content_by_file: dict[str, str] = {}
+    for obs in observations:
+        if obs.kind != "git.file_change" or obs.payload.get("status") != "MODIFIED":
+            continue
+        old_content = obs.payload.get("old_content")
+        path = obs.payload.get("path")
+        if isinstance(old_content, str) and isinstance(path, str):
+            old_content_by_file[path] = old_content
+    if not old_content_by_file:
+        return []
+
+    renames: list[dict[str, object]] = []
+    for class_qn, info in models.items():
+        file_rel = str(info["file"])
+        old_content = old_content_by_file.get(file_rel)
+        if old_content is None:
+            continue
+        try:
+            old_tree = ast.parse(old_content)
+        except SyntaxError:
+            continue
+        old_class_node = find_class_node(old_tree, class_qn.rsplit(".", 1)[-1])
+        if old_class_node is None:
+            continue  # the class itself has no counterpart under this name
+
+        ctx = _augmented_context(index, str(info["module_qn"]), local_names_by_module)
+        old_columns = {str(c["field_name"]): c for c in _extract_columns(old_class_node, ctx)}
+        new_columns = columns_detail_by_model.get(class_qn, {})
+
+        disappeared = set(old_columns) - set(new_columns)
+        appeared = set(new_columns) - set(old_columns)
+        if len(disappeared) != 1 or len(appeared) != 1:
+            continue  # ambiguous, or nothing changed here -- do not guess
+
+        old_field = next(iter(disappeared))
+        new_field = next(iter(appeared))
+        old_column = old_columns[old_field]
+        new_column = new_columns[new_field]
+        if _base_type_name(old_column.get("column_type_text")) != _base_type_name(
+            new_column.get("column_type_text")
+        ):
+            continue  # the type family changed too -- not enough evidence
+
+        table_name = str(info["table_name"])
+        renames.append(
+            {
+                "table_name": table_name,
+                "old_field_name": old_field,
+                "new_field_name": new_field,
+                "shape_matched": (
+                    old_column.get("column_type_text") == new_column.get("column_type_text")
+                    and old_column.get("is_primary_key") == new_column.get("is_primary_key")
+                ),
+                "file": file_rel,
+                "line": new_column["line"],
+            }
+        )
+    return renames
 
 
 def _local_model_instances(

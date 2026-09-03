@@ -12,6 +12,7 @@ import pytest
 from hashira.adapters.python import PythonAdapter
 from hashira.adapters.python.discovery import discover_python_files
 from hashira.adapters.sqlalchemy import SQLAlchemyAdapter
+from hashira.core import Observation, Origin
 from hashira.core.ids import IDPrefix, new_id
 from hashira.ports.adapters import ExtractionResult
 
@@ -293,3 +294,206 @@ def test_no_sqlalchemy_shaped_code_produces_no_observations(tmp_path: Path, syst
     addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
     assert addition.observations == []
     assert addition.errors == []
+
+
+# --- declaration-rename detection (identity/declaration_evidence.py's raw material) --
+
+
+def _git_modified(system_id: str, path: str, old_content: str) -> Observation:
+    """A synthetic `git.file_change` observation, exactly the shape
+    `GitAdapter` would report for a `MODIFIED` (not renamed) file -- built
+    directly here since these tests are about `_detect_declaration_renames`'s
+    own comparison logic, not about driving a real Git repository (that is
+    `tests/integration/test_identity_evolution.py`'s job)."""
+    return Observation(
+        system_id=system_id,
+        adapter="git@0.1.0",
+        origin=Origin.GIT,
+        kind="git.file_change",
+        payload={
+            "status": "MODIFIED",
+            "path": path,
+            "old_path": None,
+            "similarity": None,
+            "from_revision": "rev0",
+            "to_revision": "rev1",
+            "old_content": old_content,
+        },
+    )
+
+
+def test_an_unambiguous_column_rename_is_detected(tmp_path: Path, system_id: str) -> None:
+    old_content = (
+        "from sqlalchemy import Column, Integer, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    id = Column(Integer, primary_key=True)\n"
+        "    status = Column(String(20))\n"
+    )
+    _write(
+        tmp_path,
+        "models.py",
+        old_content.replace("status = Column(String(20))", "state = Column(String(20))"),
+    )
+    base = _base(tmp_path, system_id)
+    base.observations.append(_git_modified(system_id, "models.py", old_content))
+
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    renames = _by_kind(addition, "sqlalchemy.declaration_rename")
+    assert len(renames) == 1
+    assert renames[0].payload["table_name"] == "payments"
+    assert renames[0].payload["old_field_name"] == "status"
+    assert renames[0].payload["new_field_name"] == "state"
+    assert renames[0].payload["shape_matched"] is True
+
+
+def test_a_type_family_change_alongside_the_rename_is_not_detected(
+    tmp_path: Path, system_id: str
+) -> None:
+    old_content = (
+        "from sqlalchemy import Column, Integer, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    id = Column(Integer, primary_key=True)\n"
+        "    status = Column(String(20))\n"
+    )
+    _write(
+        tmp_path,
+        "models.py",
+        old_content.replace("status = Column(String(20))", "state = Column(Integer)"),
+    )
+    base = _base(tmp_path, system_id)
+    base.observations.append(_git_modified(system_id, "models.py", old_content))
+
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.declaration_rename") == []
+
+
+def test_a_length_only_change_is_detected_but_not_shape_matched(
+    tmp_path: Path, system_id: str
+) -> None:
+    """The base type family agrees (`String` stays `String`) so the rename
+    is still detected, but the shapes are not byte-for-byte identical --
+    `shape_matched` reflects that, and `application/indexing.py`'s
+    `_extract_declaration_renames` maps it to `LIKELY`, not `CERTAIN`,
+    confidence."""
+    old_content = (
+        "from sqlalchemy import Column, Integer, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    id = Column(Integer, primary_key=True)\n"
+        "    status = Column(String(20))\n"
+    )
+    _write(
+        tmp_path,
+        "models.py",
+        old_content.replace("status = Column(String(20))", "state = Column(String(50))"),
+    )
+    base = _base(tmp_path, system_id)
+    base.observations.append(_git_modified(system_id, "models.py", old_content))
+
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    renames = _by_kind(addition, "sqlalchemy.declaration_rename")
+    assert len(renames) == 1
+    assert renames[0].payload["shape_matched"] is False
+
+
+def test_ambiguous_multi_column_changes_are_not_detected(tmp_path: Path, system_id: str) -> None:
+    """Two columns disappeared, two appeared, in the same table -- which
+    corresponds to which is genuinely ambiguous, so nothing is proposed for
+    either, matching `identity/git_evidence.py`'s own refusal to guess at a
+    name collision."""
+    old_content = (
+        "from sqlalchemy import Column, Integer, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    id = Column(Integer, primary_key=True)\n"
+        "    status = Column(String(20))\n"
+        "    note = Column(String(100))\n"
+    )
+    _write(
+        tmp_path,
+        "models.py",
+        old_content.replace("status = Column(String(20))", "state = Column(String(20))").replace(
+            "note = Column(String(100))", "comment = Column(String(100))"
+        ),
+    )
+    base = _base(tmp_path, system_id)
+    base.observations.append(_git_modified(system_id, "models.py", old_content))
+
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.declaration_rename") == []
+
+
+def test_no_old_content_is_handled_gracefully(tmp_path: Path, system_id: str) -> None:
+    _write(
+        tmp_path,
+        "models.py",
+        "from sqlalchemy import Column, Integer, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    id = Column(Integer, primary_key=True)\n"
+        "    state = Column(String(20))\n",
+    )
+    base = _base(tmp_path, system_id)
+    base.observations.append(
+        Observation(
+            system_id=system_id,
+            adapter="git@0.1.0",
+            origin=Origin.GIT,
+            kind="git.file_change",
+            payload={
+                "status": "MODIFIED",
+                "path": "models.py",
+                "old_path": None,
+                "similarity": None,
+                "from_revision": "rev0",
+                "to_revision": "rev1",
+                "old_content": None,
+            },
+        )
+    )
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.declaration_rename") == []
+    assert addition.errors == []
+
+
+def test_the_class_itself_renamed_in_the_same_commit_gets_no_declaration_rename(
+    tmp_path: Path, system_id: str
+) -> None:
+    """This mechanism is scoped to "the class stayed put, a field within it
+    changed" -- if the class's own simple name is also different, there is
+    no old counterpart to find it under, and nothing is proposed (a class
+    rename is `GIT_RENAME`'s job, not this module's, and stacking both at
+    once is explicitly out of scope for this pass)."""
+    old_content = (
+        "from sqlalchemy import Column, Integer, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    id = Column(Integer, primary_key=True)\n"
+        "    status = Column(String(20))\n"
+    )
+    _write(
+        tmp_path,
+        "models.py",
+        old_content.replace("class Payment(Base):", "class Charge(Base):").replace(
+            "status = Column(String(20))", "state = Column(String(20))"
+        ),
+    )
+    base = _base(tmp_path, system_id)
+    base.observations.append(_git_modified(system_id, "models.py", old_content))
+
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.declaration_rename") == []

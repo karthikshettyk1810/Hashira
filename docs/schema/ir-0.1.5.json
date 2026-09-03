@@ -1,0 +1,2179 @@
+{
+  "$defs": {
+    "Change": {
+      "$defs": {
+        "Actor": {
+          "additionalProperties": true,
+          "description": "Who caused something. ``UNKNOWN`` is legitimate and better than a guess.",
+          "properties": {
+            "id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Id"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "type": {
+              "$ref": "#/$defs/ActorType",
+              "default": "UNKNOWN"
+            }
+          },
+          "title": "Actor",
+          "type": "object"
+        },
+        "ActorType": {
+          "description": "Who or what caused an event or change.",
+          "enum": [
+            "DEVELOPER",
+            "AGENT",
+            "SYSTEM",
+            "INTEGRATION",
+            "UNKNOWN"
+          ],
+          "title": "ActorType",
+          "type": "string"
+        },
+        "ChangeOutcome": {
+          "description": "How a change ended up, once history can say.",
+          "enum": [
+            "UNKNOWN",
+            "VERIFIED",
+            "REVERTED",
+            "IMPLICATED_IN_INCIDENT"
+          ],
+          "title": "ChangeOutcome",
+          "type": "string"
+        },
+        "ChangeType": {
+          "description": "Spec \u00a716.",
+          "enum": [
+            "COMMIT",
+            "PULL_REQUEST",
+            "MIGRATION",
+            "CONFIGURATION",
+            "INFRASTRUCTURE",
+            "DEPENDENCY_UPGRADE",
+            "REVERT"
+          ],
+          "title": "ChangeType",
+          "type": "string"
+        },
+        "Confidence": {
+          "description": "How much weight a claim carries.\n\nDeliberately ordinal rather than a float. A ``0.9`` from a call-graph walker\nand a ``0.9`` from a language model are not the same quantity and cannot be\ncompared or multiplied, but a float schema invites exactly that. Three levels\nwith defined meanings stay honest and stay comparable.\n\nSee docs/IR.md for the deviation from \u00a711's ``confidence: 1.0``.",
+          "enum": [
+            "CERTAIN",
+            "LIKELY",
+            "SPECULATIVE"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "RiskAssessment": {
+          "additionalProperties": true,
+          "description": "What a change might cost, separate from how far it reaches.\n\nSpec \u00a725 draws the distinction that matters: graph reachability is not risk.\nA helper touched by four hundred modules may be trivial; a twenty-line change\ninside payment capture is not.",
+          "properties": {
+            "blast_radius": {
+              "default": 0,
+              "description": "Transitively reachable entities.",
+              "minimum": 0,
+              "title": "Blast Radius",
+              "type": "integer"
+            },
+            "confidence": {
+              "$ref": "#/$defs/Confidence"
+            },
+            "critical_paths": {
+              "description": "Named workflows the change intersects.",
+              "items": {
+                "type": "string"
+              },
+              "title": "Critical Paths",
+              "type": "array"
+            },
+            "evidence_ids": {
+              "items": {
+                "pattern": "^ev_[0-9A-HJKMNP-TV-Z]{26}$",
+                "type": "string"
+              },
+              "title": "Evidence Ids",
+              "type": "array"
+            },
+            "level": {
+              "pattern": "^(LOW|MEDIUM|HIGH|CRITICAL)$",
+              "title": "Level",
+              "type": "string"
+            },
+            "rationale": {
+              "minLength": 1,
+              "title": "Rationale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "level",
+            "rationale",
+            "confidence"
+          ],
+          "title": "RiskAssessment",
+          "type": "object"
+        },
+        "VerificationResult": {
+          "additionalProperties": true,
+          "description": "Whether the change was checked, and by what.",
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "evidence_ids": {
+              "items": {
+                "pattern": "^ev_[0-9A-HJKMNP-TV-Z]{26}$",
+                "type": "string"
+              },
+              "title": "Evidence Ids",
+              "type": "array"
+            },
+            "kind": {
+              "description": "e.g. 'unit', 'integration', 'e2e', 'policy', 'runtime'.",
+              "title": "Kind",
+              "type": "string"
+            },
+            "passed": {
+              "title": "Passed",
+              "type": "boolean"
+            },
+            "recorded_at": {
+              "format": "date-time",
+              "title": "Recorded At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "passed"
+          ],
+          "title": "VerificationResult",
+          "type": "object"
+        }
+      },
+      "additionalProperties": true,
+      "description": "A modification, what it was meant to do, and what it turned out to do.\n\nDeclared intent and inferred impact are held apart on purpose (\u00a716). The gap\nbetween \"optimize payment processing\" and \"touches refunds and subscriptions\"\nis the most useful thing Hashira can show a reviewer.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/Actor"
+        },
+        "affected_entity_ids": {
+          "items": {
+            "pattern": "^ent_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Affected Entity Ids",
+          "type": "array"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "declared_intent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the author said they were doing.",
+          "title": "Declared Intent"
+        },
+        "deployment_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Deployment Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^chg_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "inferred_intent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What Hashira concluded. Never overwrites the declaration.",
+          "title": "Inferred Intent"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ChangeOutcome",
+          "default": "UNKNOWN"
+        },
+        "pull_request": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pull Request"
+        },
+        "related_incident_ids": {
+          "items": {
+            "pattern": "^inc_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Related Incident Ids",
+          "type": "array"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revision"
+        },
+        "risk": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RiskAssessment"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "type": {
+          "$ref": "#/$defs/ChangeType"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        },
+        "verification": {
+          "items": {
+            "$ref": "#/$defs/VerificationResult"
+          },
+          "title": "Verification",
+          "type": "array"
+        }
+      },
+      "required": [
+        "system_id",
+        "type"
+      ],
+      "title": "Change",
+      "type": "object"
+    },
+    "Deployment": {
+      "additionalProperties": true,
+      "description": "A deployed version and the environment it landed in (spec \u00a78, \u00a722).",
+      "properties": {
+        "completed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completed At"
+        },
+        "component_entity_ids": {
+          "items": {
+            "pattern": "^ent_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Component Entity Ids",
+          "type": "array"
+        },
+        "environment": {
+          "minLength": 1,
+          "title": "Environment",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "pattern": "^ev_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^dep_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revision"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "succeeded": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Succeeded"
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system_id",
+        "environment",
+        "version"
+      ],
+      "title": "Deployment",
+      "type": "object"
+    },
+    "Entity": {
+      "$defs": {
+        "Confidence": {
+          "description": "How much weight a claim carries.\n\nDeliberately ordinal rather than a float. A ``0.9`` from a call-graph walker\nand a ``0.9`` from a language model are not the same quantity and cannot be\ncompared or multiplied, but a float schema invites exactly that. Three levels\nwith defined meanings stay honest and stay comparable.\n\nSee docs/IR.md for the deviation from \u00a711's ``confidence: 1.0``.",
+          "enum": [
+            "CERTAIN",
+            "LIKELY",
+            "SPECULATIVE"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "EntityStatus": {
+          "description": "Whether an entity is still part of the system as last indexed.",
+          "enum": [
+            "ACTIVE",
+            "REMOVED",
+            "SUPERSEDED"
+          ],
+          "title": "EntityStatus",
+          "type": "string"
+        },
+        "EntityType": {
+          "description": "Spec \u00a78. The universal semantic types an adapter may map onto.",
+          "enum": [
+            "SYSTEM",
+            "COMPONENT",
+            "MODULE",
+            "SYMBOL",
+            "INTERFACE",
+            "DATA_STORE",
+            "DATA_ENTITY",
+            "MESSAGE_CHANNEL",
+            "PROCESS",
+            "EXTERNAL_SYSTEM",
+            "DEPENDENCY",
+            "TEST",
+            "CONFIGURATION",
+            "INFRASTRUCTURE",
+            "ENVIRONMENT",
+            "DEPLOYMENT",
+            "EVENT",
+            "INCIDENT",
+            "CHANGE",
+            "DECISION",
+            "CONSTRAINT"
+          ],
+          "title": "EntityType",
+          "type": "string"
+        },
+        "IdentityClaim": {
+          "additionalProperties": true,
+          "description": "One signal that an entity is the entity we think it is (\u00a710).\n\nIdentity resolution is a ladder, not a lookup: a stable symbol id beats a\nqualified name, which beats a file path. Each rung records what it matched on\nand how strongly, so a wrong merge can be explained and undone.",
+          "properties": {
+            "confidence": {
+              "$ref": "#/$defs/Confidence"
+            },
+            "kind": {
+              "$ref": "#/$defs/IdentityClaimKind"
+            },
+            "observed_at": {
+              "format": "date-time",
+              "title": "Observed At",
+              "type": "string"
+            },
+            "origin": {
+              "$ref": "#/$defs/Origin"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value",
+            "origin",
+            "confidence"
+          ],
+          "title": "IdentityClaim",
+          "type": "object"
+        },
+        "IdentityClaimKind": {
+          "description": "The signals identity resolution may weigh (spec \u00a710).\n\nRanked in ``hashira.identity.resolver`` by how much a single hit is worth\ntrusting on its own. The vocabulary is closed here for the same reason\nevery other enum in this module is: a new signal source is a deliberate\naddition to the ladder's policy, not a string an adapter happens to invent.",
+          "enum": [
+            "SYMBOL_ID",
+            "USER_DECLARED",
+            "DECLARATION_ANCHOR",
+            "GIT_RENAME",
+            "MIGRATION_LINEAGE",
+            "DECLARATION_LINEAGE",
+            "QUALIFIED_NAME",
+            "STRUCTURAL_SIMILARITY"
+          ],
+          "title": "IdentityClaimKind",
+          "type": "string"
+        },
+        "Origin": {
+          "description": "Where a claim came from. Determines its default confidence.",
+          "enum": [
+            "GIT",
+            "PARSER",
+            "STATIC_ANALYSIS",
+            "LSP",
+            "SCIP",
+            "MANIFEST",
+            "MIGRATION",
+            "CONFIGURATION",
+            "INFRASTRUCTURE",
+            "TEST_REPORT",
+            "CI",
+            "RUNTIME",
+            "USER_DECLARED",
+            "DERIVED",
+            "LLM"
+          ],
+          "title": "Origin",
+          "type": "string"
+        },
+        "SourceLocation": {
+          "additionalProperties": true,
+          "description": "Where a construct was seen. Evidence about an entity, never its identity (\u00a710).",
+          "properties": {
+            "file": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repository-relative path.",
+              "title": "File"
+            },
+            "line_end": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Line End"
+            },
+            "line_start": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Line Start"
+            },
+            "repository": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repository"
+            },
+            "revision": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Commit SHA or equivalent immutable revision id.",
+              "title": "Revision"
+            }
+          },
+          "title": "SourceLocation",
+          "type": "object"
+        },
+        "TechnologyInfo": {
+          "additionalProperties": true,
+          "description": "The stack an entity belongs to.\n\nAdapters populate this; the core never branches on it. Anything more specific\nthan these three axes belongs in an adapter extension (\u00a718).",
+          "properties": {
+            "framework": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Framework"
+            },
+            "language": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Language"
+            },
+            "runtime": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Runtime"
+            }
+          },
+          "title": "TechnologyInfo",
+          "type": "object"
+        }
+      },
+      "additionalProperties": true,
+      "description": "A canonical thing in the system (\u00a79).\n\nThe envelope stays small on purpose. Technology-specific data lives in\n``metadata`` or an adapter extension so that adding a framework never\nreshapes the core (\u00a79, \u00a731).",
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "first_seen_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Seen Revision"
+        },
+        "id": {
+          "pattern": "^ent_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "identity_claims": {
+          "items": {
+            "$ref": "#/$defs/IdentityClaim"
+          },
+          "title": "Identity Claims",
+          "type": "array"
+        },
+        "last_seen_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Seen Revision"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "qualified_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Semantic identifier, e.g. 'payments.services.PaymentService.process'. Mutable: it is evidence about the entity, not the entity's identity.",
+          "title": "Qualified Name"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceLocation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "status": {
+          "$ref": "#/$defs/EntityStatus",
+          "default": "ACTIVE"
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        },
+        "technology": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TechnologyInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "type": {
+          "$ref": "#/$defs/EntityType"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system_id",
+        "type",
+        "name"
+      ],
+      "title": "Entity",
+      "type": "object"
+    },
+    "Event": {
+      "$defs": {
+        "Actor": {
+          "additionalProperties": true,
+          "description": "Who caused something. ``UNKNOWN`` is legitimate and better than a guess.",
+          "properties": {
+            "id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Id"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "type": {
+              "$ref": "#/$defs/ActorType",
+              "default": "UNKNOWN"
+            }
+          },
+          "title": "Actor",
+          "type": "object"
+        },
+        "ActorType": {
+          "description": "Who or what caused an event or change.",
+          "enum": [
+            "DEVELOPER",
+            "AGENT",
+            "SYSTEM",
+            "INTEGRATION",
+            "UNKNOWN"
+          ],
+          "title": "ActorType",
+          "type": "string"
+        },
+        "EventType": {
+          "description": "Spec \u00a714. Immutable occurrences in system history.",
+          "enum": [
+            "REPOSITORY_DISCOVERED",
+            "CODE_INDEXED",
+            "COMMIT_CREATED",
+            "FILE_CHANGED",
+            "TEST_EXECUTED",
+            "TEST_FAILED",
+            "TEST_PASSED",
+            "DEPLOYMENT_STARTED",
+            "DEPLOYMENT_COMPLETED",
+            "DEPLOYMENT_FAILED",
+            "RUNTIME_ERROR",
+            "RUNTIME_METRIC",
+            "INCIDENT_CREATED",
+            "INCIDENT_RESOLVED",
+            "DECISION_RECORDED",
+            "CONFIGURATION_CHANGED",
+            "ENTITY_IDENTITY_MERGED"
+          ],
+          "title": "EventType",
+          "type": "string"
+        },
+        "SourceRef": {
+          "additionalProperties": true,
+          "description": "The external system a record came from, and its reference there.",
+          "properties": {
+            "provider": {
+              "description": "e.g. 'git', 'github', 'sentry', 'pytest'.",
+              "title": "Provider",
+              "type": "string"
+            },
+            "reference": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Provider-local identifier: a SHA, a URL, an issue key.",
+              "title": "Reference"
+            },
+            "retrieved_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Retrieved At"
+            }
+          },
+          "required": [
+            "provider"
+          ],
+          "title": "SourceRef",
+          "type": "object"
+        }
+      },
+      "additionalProperties": true,
+      "description": "An immutable occurrence.\n\nIngestion must be idempotent (\u00a730): the same commit seen twice is one event.\n``dedupe_key`` is the natural key a store uniquely indexes on, derived from\nthe source reference when the producer does not supply one.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/Actor"
+        },
+        "dedupe_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dedupe Key"
+        },
+        "id": {
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "subject_entity_ids": {
+          "items": {
+            "pattern": "^ent_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Subject Entity Ids",
+          "type": "array"
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/EventType"
+        }
+      },
+      "required": [
+        "system_id",
+        "type",
+        "source"
+      ],
+      "title": "Event",
+      "type": "object"
+    },
+    "Evidence": {
+      "$defs": {
+        "Origin": {
+          "description": "Where a claim came from. Determines its default confidence.",
+          "enum": [
+            "GIT",
+            "PARSER",
+            "STATIC_ANALYSIS",
+            "LSP",
+            "SCIP",
+            "MANIFEST",
+            "MIGRATION",
+            "CONFIGURATION",
+            "INFRASTRUCTURE",
+            "TEST_REPORT",
+            "CI",
+            "RUNTIME",
+            "USER_DECLARED",
+            "DERIVED",
+            "LLM"
+          ],
+          "title": "Origin",
+          "type": "string"
+        },
+        "SourceRef": {
+          "additionalProperties": true,
+          "description": "The external system a record came from, and its reference there.",
+          "properties": {
+            "provider": {
+              "description": "e.g. 'git', 'github', 'sentry', 'pytest'.",
+              "title": "Provider",
+              "type": "string"
+            },
+            "reference": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Provider-local identifier: a SHA, a URL, an issue key.",
+              "title": "Reference"
+            },
+            "retrieved_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Retrieved At"
+            }
+          },
+          "required": [
+            "provider"
+          ],
+          "title": "SourceRef",
+          "type": "object"
+        }
+      },
+      "additionalProperties": true,
+      "description": "An immutable record of something a source actually said.\n\nEvidence is the terminal node of every \"why do you believe that?\" chain. It is\nfrozen because an inference built on it must remain auditable even after the\nworld has moved on: a later observation may invalidate the conclusion, but it\nmay not rewrite the record that led there.",
+      "properties": {
+        "content_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Digest of the underlying artifact, for idempotent ingestion.",
+          "title": "Content Hash"
+        },
+        "excerpt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The verbatim fragment, redacted per the security policy.",
+          "title": "Excerpt"
+        },
+        "id": {
+          "pattern": "^ev_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "locator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Path, URL, query or offset that reproduces this evidence.",
+          "title": "Locator"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "summary": {
+          "description": "One line a human can read without opening the source.",
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system_id",
+        "origin",
+        "source",
+        "summary"
+      ],
+      "title": "Evidence",
+      "type": "object"
+    },
+    "Incident": {
+      "$defs": {
+        "CausalHypothesis": {
+          "additionalProperties": true,
+          "description": "A candidate explanation, explicitly not a conclusion.\n\nSpec \u00a738 lists false causal conclusions as a top risk. The countermeasure is\nstructural: a suspected cause cannot be stored as a cause. It is a hypothesis\nwith a status, and it only becomes ``CONFIRMED`` when something verified it.",
+          "properties": {
+            "confidence": {
+              "$ref": "#/$defs/Confidence"
+            },
+            "created_at": {
+              "format": "date-time",
+              "title": "Created At",
+              "type": "string"
+            },
+            "evidence_ids": {
+              "items": {
+                "pattern": "^ev_[0-9A-HJKMNP-TV-Z]{26}$",
+                "type": "string"
+              },
+              "title": "Evidence Ids",
+              "type": "array"
+            },
+            "statement": {
+              "minLength": 1,
+              "title": "Statement",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/InferenceStatus",
+              "default": "PROPOSED"
+            },
+            "suspect_change_ids": {
+              "items": {
+                "pattern": "^chg_[0-9A-HJKMNP-TV-Z]{26}$",
+                "type": "string"
+              },
+              "title": "Suspect Change Ids",
+              "type": "array"
+            },
+            "suspect_entity_ids": {
+              "items": {
+                "pattern": "^ent_[0-9A-HJKMNP-TV-Z]{26}$",
+                "type": "string"
+              },
+              "title": "Suspect Entity Ids",
+              "type": "array"
+            }
+          },
+          "required": [
+            "statement",
+            "confidence"
+          ],
+          "title": "CausalHypothesis",
+          "type": "object"
+        },
+        "Confidence": {
+          "description": "How much weight a claim carries.\n\nDeliberately ordinal rather than a float. A ``0.9`` from a call-graph walker\nand a ``0.9`` from a language model are not the same quantity and cannot be\ncompared or multiplied, but a float schema invites exactly that. Three levels\nwith defined meanings stay honest and stay comparable.\n\nSee docs/IR.md for the deviation from \u00a711's ``confidence: 1.0``.",
+          "enum": [
+            "CERTAIN",
+            "LIKELY",
+            "SPECULATIVE"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "IncidentSeverity": {
+          "description": "Spec \u00a717.",
+          "enum": [
+            "SEV1",
+            "SEV2",
+            "SEV3",
+            "SEV4"
+          ],
+          "title": "IncidentSeverity",
+          "type": "string"
+        },
+        "IncidentStatus": {
+          "description": "Spec \u00a717.",
+          "enum": [
+            "OPEN",
+            "INVESTIGATING",
+            "MITIGATED",
+            "RESOLVED",
+            "CLOSED"
+          ],
+          "title": "IncidentStatus",
+          "type": "string"
+        },
+        "InferenceStatus": {
+          "description": "Spec \u00a712. The lifecycle every non-deterministic claim moves through.",
+          "enum": [
+            "PROPOSED",
+            "SUPPORTED",
+            "CONFIRMED",
+            "CONTRADICTED",
+            "REJECTED"
+          ],
+          "title": "InferenceStatus",
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "An operational failure and everything Hashira can connect it to.",
+      "properties": {
+        "affected_entity_ids": {
+          "items": {
+            "pattern": "^ent_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Affected Entity Ids",
+          "type": "array"
+        },
+        "confirmed_cause": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirmed Cause"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ended At"
+        },
+        "evidence_ids": {
+          "items": {
+            "pattern": "^ev_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "hypotheses": {
+          "items": {
+            "$ref": "#/$defs/CausalHypothesis"
+          },
+          "title": "Hypotheses",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^inc_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "External key, e.g. 'INC-182'.",
+          "title": "Reference"
+        },
+        "related_change_ids": {
+          "items": {
+            "pattern": "^chg_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Related Change Ids",
+          "type": "array"
+        },
+        "related_deployment_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Related Deployment Ids",
+          "type": "array"
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolution"
+        },
+        "severity": {
+          "$ref": "#/$defs/IncidentSeverity"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/IncidentStatus",
+          "default": "OPEN"
+        },
+        "symptoms": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Symptoms",
+          "type": "array"
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system_id",
+        "title",
+        "severity",
+        "started_at"
+      ],
+      "title": "Incident",
+      "type": "object"
+    },
+    "Inference": {
+      "$defs": {
+        "Confidence": {
+          "description": "How much weight a claim carries.\n\nDeliberately ordinal rather than a float. A ``0.9`` from a call-graph walker\nand a ``0.9`` from a language model are not the same quantity and cannot be\ncompared or multiplied, but a float schema invites exactly that. Three levels\nwith defined meanings stay honest and stay comparable.\n\nSee docs/IR.md for the deviation from \u00a711's ``confidence: 1.0``.",
+          "enum": [
+            "CERTAIN",
+            "LIKELY",
+            "SPECULATIVE"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "InferenceStatus": {
+          "description": "Spec \u00a712. The lifecycle every non-deterministic claim moves through.",
+          "enum": [
+            "PROPOSED",
+            "SUPPORTED",
+            "CONFIRMED",
+            "CONTRADICTED",
+            "REJECTED"
+          ],
+          "title": "InferenceStatus",
+          "type": "string"
+        },
+        "KnowledgeClass": {
+          "description": "Spec \u00a712. What kind of claim a record is, and therefore how far to trust it.\n\nThe whole epistemic model rests on never collapsing these into one another.",
+          "enum": [
+            "OBSERVATION",
+            "DERIVATION",
+            "INFERENCE",
+            "HYPOTHESIS"
+          ],
+          "title": "KnowledgeClass",
+          "type": "string"
+        },
+        "Origin": {
+          "description": "Where a claim came from. Determines its default confidence.",
+          "enum": [
+            "GIT",
+            "PARSER",
+            "STATIC_ANALYSIS",
+            "LSP",
+            "SCIP",
+            "MANIFEST",
+            "MIGRATION",
+            "CONFIGURATION",
+            "INFRASTRUCTURE",
+            "TEST_REPORT",
+            "CI",
+            "RUNTIME",
+            "USER_DECLARED",
+            "DERIVED",
+            "LLM"
+          ],
+          "title": "Origin",
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "A derived, semantic or probabilistic conclusion (\u00a712).\n\nUnlike evidence this is mutable, because its *status* is the point: an\ninference is proposed, then supported or contradicted as the world reveals\nitself. What cannot change is the evidence it was built on.",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Confidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "pattern": "^ev_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^inf_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "knowledge_class": {
+          "$ref": "#/$defs/KnowledgeClass"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model identifier and version.",
+          "title": "Model"
+        },
+        "origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model provider, when an LLM produced this (\u00a726).",
+          "title": "Provider"
+        },
+        "statement": {
+          "description": "The claim, stated plainly.",
+          "minLength": 1,
+          "title": "Statement",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/InferenceStatus",
+          "default": "PROPOSED"
+        },
+        "subject_entity_ids": {
+          "items": {
+            "pattern": "^ent_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Subject Entity Ids",
+          "type": "array"
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system_id",
+        "knowledge_class",
+        "statement",
+        "origin"
+      ],
+      "title": "Inference",
+      "type": "object"
+    },
+    "Observation": {
+      "$defs": {
+        "Origin": {
+          "description": "Where a claim came from. Determines its default confidence.",
+          "enum": [
+            "GIT",
+            "PARSER",
+            "STATIC_ANALYSIS",
+            "LSP",
+            "SCIP",
+            "MANIFEST",
+            "MIGRATION",
+            "CONFIGURATION",
+            "INFRASTRUCTURE",
+            "TEST_REPORT",
+            "CI",
+            "RUNTIME",
+            "USER_DECLARED",
+            "DERIVED",
+            "LLM"
+          ],
+          "title": "Origin",
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "A normalized fact from a source, before it becomes graph state (\u00a719).\n\nObservations are what adapters emit. Persisting them separately from the\nentities they produce is what makes indexing replayable and lets us answer\n\"which adapter claimed this, and at which revision?\" long after the fact.",
+      "properties": {
+        "adapter": {
+          "description": "Adapter name and version that produced this.",
+          "title": "Adapter",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "pattern": "^ev_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^obs_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Adapter-local discriminator, e.g. 'python.function'.",
+          "title": "Kind",
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revision"
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system_id",
+        "adapter",
+        "origin",
+        "kind"
+      ],
+      "title": "Observation",
+      "type": "object"
+    },
+    "Relationship": {
+      "$defs": {
+        "Confidence": {
+          "description": "How much weight a claim carries.\n\nDeliberately ordinal rather than a float. A ``0.9`` from a call-graph walker\nand a ``0.9`` from a language model are not the same quantity and cannot be\ncompared or multiplied, but a float schema invites exactly that. Three levels\nwith defined meanings stay honest and stay comparable.\n\nSee docs/IR.md for the deviation from \u00a711's ``confidence: 1.0``.",
+          "enum": [
+            "CERTAIN",
+            "LIKELY",
+            "SPECULATIVE"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "KnowledgeClass": {
+          "description": "Spec \u00a712. What kind of claim a record is, and therefore how far to trust it.\n\nThe whole epistemic model rests on never collapsing these into one another.",
+          "enum": [
+            "OBSERVATION",
+            "DERIVATION",
+            "INFERENCE",
+            "HYPOTHESIS"
+          ],
+          "title": "KnowledgeClass",
+          "type": "string"
+        },
+        "Origin": {
+          "description": "Where a claim came from. Determines its default confidence.",
+          "enum": [
+            "GIT",
+            "PARSER",
+            "STATIC_ANALYSIS",
+            "LSP",
+            "SCIP",
+            "MANIFEST",
+            "MIGRATION",
+            "CONFIGURATION",
+            "INFRASTRUCTURE",
+            "TEST_REPORT",
+            "CI",
+            "RUNTIME",
+            "USER_DECLARED",
+            "DERIVED",
+            "LLM"
+          ],
+          "title": "Origin",
+          "type": "string"
+        },
+        "RelationshipType": {
+          "description": "Spec \u00a711, plus three additions documented in docs/IR.md.\n\n``SUPERSEDES`` carries identity lineage: when resolution cannot establish\nwith sufficient confidence that a renamed or relocated construct is the same\nentity, we mint a new entity and record the lineage rather than silently\noverwriting history (\u00a710).\n\n``MAPS_TO`` and ``REFERENCES`` came from the SQLAlchemy `DataAdapter`\nmilestone (`adapters/sqlalchemy/`), where two genuinely new semantic\nrelationships showed up that no existing type honestly covered:\n``MAPS_TO`` is a Python class's declarative binding to the physical\nentity it persists to (``EXTENDS``/``IMPLEMENTS`` are about code\nstructure, not this; ``RELATED_TO`` is too vague to be useful in an\nimpact query) -- unlike a FastAPI handler, an ORM class and its table\nare not the same conceptual thing, so tagging the class in place (the\nrule every other framework enricher here follows) would have been\ndishonest. ``REFERENCES`` is a foreign-key relationship between two\ncolumns -- a relational-database fact independent of any one adapter,\ndistinct from ``DEPENDS_ON`` (which already spans build-time import\ndependencies and runtime dependency injection; folding a third, very\ndifferent kind of dependency into it would cost precision on every\nexisting query that walks it).",
+          "enum": [
+            "CONTAINS",
+            "DEFINES",
+            "IMPORTS",
+            "CALLS",
+            "EXTENDS",
+            "IMPLEMENTS",
+            "DEPENDS_ON",
+            "EXPOSES",
+            "CONSUMES",
+            "PRODUCES",
+            "READS",
+            "WRITES",
+            "TRIGGERS",
+            "PUBLISHES",
+            "SUBSCRIBES",
+            "RUNS_IN",
+            "DEPLOYS_TO",
+            "CONFIGURED_BY",
+            "TESTED_BY",
+            "MONITORED_BY",
+            "CHANGED_BY",
+            "AFFECTS",
+            "CAUSED",
+            "FIXED_BY",
+            "RELATED_TO",
+            "SUPERSEDES",
+            "MAPS_TO",
+            "REFERENCES"
+          ],
+          "title": "RelationshipType",
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "A typed, provenance-carrying, time-bounded edge between two entities.\n\nRelationships are first-class records rather than adjacency lists because\nalmost every interesting question is about the edge itself: who says\nPaymentService calls Razorpay, how sure are they, and was that still true at\nthe revision that broke?",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Confidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evidence_ids": {
+          "items": {
+            "pattern": "^ev_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^rel_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "knowledge_class": {
+          "$ref": "#/$defs/KnowledgeClass",
+          "default": "OBSERVATION"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "source_entity_id": {
+          "pattern": "^ent_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Source Entity Id",
+          "type": "string"
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        },
+        "target_entity_id": {
+          "pattern": "^ent_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Target Entity Id",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/RelationshipType"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_from_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Revision at which this edge was first observed.",
+          "title": "Valid From Revision"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid Until"
+        },
+        "valid_until_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Revision at which it stopped being observed; None means current.",
+          "title": "Valid Until Revision"
+        }
+      },
+      "required": [
+        "system_id",
+        "source_entity_id",
+        "target_entity_id",
+        "type",
+        "origin"
+      ],
+      "title": "Relationship",
+      "type": "object"
+    },
+    "Revision": {
+      "additionalProperties": true,
+      "description": "One point in a system's history, as recorded by whatever VCS produced\nit. Ancestry, not content: this is not a commit's diff or its files,\nonly the DAG position that lets a later query decide \"did revision R\nexist by the time we reached revision S\".",
+      "properties": {
+        "authored_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authored At"
+        },
+        "id": {
+          "pattern": "^rev_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
+        "parent_shas": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Parent Shas",
+          "type": "array"
+        },
+        "provider": {
+          "default": "git",
+          "description": "Which VCS this ancestry came from.",
+          "title": "Provider",
+          "type": "string"
+        },
+        "recorded_at": {
+          "format": "date-time",
+          "title": "Recorded At",
+          "type": "string"
+        },
+        "sha": {
+          "description": "The provider's own revision identifier.",
+          "minLength": 1,
+          "title": "Sha",
+          "type": "string"
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system_id",
+        "sha"
+      ],
+      "title": "Revision",
+      "type": "object"
+    },
+    "Snapshot": {
+      "$defs": {
+        "SnapshotStatistics": {
+          "additionalProperties": true,
+          "description": "What the run produced. Also the input to Hashira's own telemetry (\u00a732).",
+          "properties": {
+            "adapters_failed": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Adapters Failed",
+              "type": "array"
+            },
+            "duration_seconds": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Duration Seconds"
+            },
+            "entity_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Entity Count",
+              "type": "integer"
+            },
+            "evidence_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Evidence Count",
+              "type": "integer"
+            },
+            "files_processed": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Files Processed",
+              "type": "integer"
+            },
+            "inference_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Inference Count",
+              "type": "integer"
+            },
+            "observation_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Observation Count",
+              "type": "integer"
+            },
+            "relationship_count": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Relationship Count",
+              "type": "integer"
+            }
+          },
+          "title": "SnapshotStatistics",
+          "type": "object"
+        },
+        "SnapshotStatus": {
+          "description": "Spec \u00a730: a failed run must not corrupt the last known-good snapshot.",
+          "enum": [
+            "BUILDING",
+            "COMPLETE",
+            "FAILED",
+            "SUPERSEDED"
+          ],
+          "title": "SnapshotStatus",
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "Hashira's understanding of a system at a revision boundary.",
+      "properties": {
+        "completed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completed At"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "diagnostics": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Diagnostics",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^snp_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "indexing_version": {
+          "description": "Version of the indexing pipeline, so behaviour changes are reviewable (\u00a733).",
+          "title": "Indexing Version",
+          "type": "string"
+        },
+        "ir_version": {
+          "title": "Ir Version",
+          "type": "string"
+        },
+        "parent_snapshot_id": {
+          "anyOf": [
+            {
+              "pattern": "^snp_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Snapshot Id"
+        },
+        "revision": {
+          "description": "The source revision this describes.",
+          "minLength": 1,
+          "title": "Revision",
+          "type": "string"
+        },
+        "statistics": {
+          "$ref": "#/$defs/SnapshotStatistics"
+        },
+        "status": {
+          "$ref": "#/$defs/SnapshotStatus",
+          "default": "BUILDING"
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system_id",
+        "revision",
+        "indexing_version",
+        "ir_version"
+      ],
+      "title": "Snapshot",
+      "type": "object"
+    },
+    "System": {
+      "additionalProperties": true,
+      "description": "A top-level software system boundary (\u00a78).\n\nWhat counts as one system is a judgement the operator makes, not one Hashira\ninfers: a monorepo may host several, and one system may span repositories.",
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "repositories": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Repositories",
+          "type": "array"
+        },
+        "slug": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+          "title": "Slug",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "slug"
+      ],
+      "title": "System",
+      "type": "object"
+    },
+    "SystemState": {
+      "$defs": {
+        "Confidence": {
+          "description": "How much weight a claim carries.\n\nDeliberately ordinal rather than a float. A ``0.9`` from a call-graph walker\nand a ``0.9`` from a language model are not the same quantity and cannot be\ncompared or multiplied, but a float schema invites exactly that. Three levels\nwith defined meanings stay honest and stay comparable.\n\nSee docs/IR.md for the deviation from \u00a711's ``confidence: 1.0``.",
+          "enum": [
+            "CERTAIN",
+            "LIKELY",
+            "SPECULATIVE"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "StateFact": {
+          "additionalProperties": true,
+          "description": "One assertion about an entity's state at a point in time.",
+          "properties": {
+            "confidence": {
+              "$ref": "#/$defs/Confidence",
+              "default": "CERTAIN"
+            },
+            "entity_id": {
+              "pattern": "^ent_[0-9A-HJKMNP-TV-Z]{26}$",
+              "title": "Entity Id",
+              "type": "string"
+            },
+            "evidence_ids": {
+              "items": {
+                "pattern": "^ev_[0-9A-HJKMNP-TV-Z]{26}$",
+                "type": "string"
+              },
+              "title": "Evidence Ids",
+              "type": "array"
+            },
+            "key": {
+              "description": "e.g. 'replicas', 'version', 'health'.",
+              "minLength": 1,
+              "title": "Key",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/StateKind"
+            },
+            "recorded_at": {
+              "format": "date-time",
+              "title": "Recorded At",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value"
+            }
+          },
+          "required": [
+            "entity_id",
+            "key",
+            "value",
+            "kind"
+          ],
+          "title": "StateFact",
+          "type": "object"
+        },
+        "StateKind": {
+          "description": "Spec \u00a715. The gap between the first two is system drift.",
+          "enum": [
+            "DESIRED",
+            "OBSERVED",
+            "HISTORICAL"
+          ],
+          "title": "StateKind",
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "The three state views, held apart so drift is computable rather than guessed.",
+      "properties": {
+        "as_of": {
+          "format": "date-time",
+          "title": "As Of",
+          "type": "string"
+        },
+        "desired": {
+          "items": {
+            "$ref": "#/$defs/StateFact"
+          },
+          "title": "Desired",
+          "type": "array"
+        },
+        "observed": {
+          "items": {
+            "$ref": "#/$defs/StateFact"
+          },
+          "title": "Observed",
+          "type": "array"
+        },
+        "system_id": {
+          "pattern": "^sys_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "System Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system_id"
+      ],
+      "title": "SystemState",
+      "type": "object"
+    }
+  },
+  "$id": "https://hashira.dev/schema/ir/0.1.5.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "adapterContractVersion": "0.1.1",
+  "eventSchemaVersion": "0.1.0",
+  "title": "Hashira System IR",
+  "version": "0.1.5"
+}

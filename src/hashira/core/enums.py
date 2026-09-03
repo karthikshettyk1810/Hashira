@@ -72,6 +72,19 @@ class IdentityClaimKind(StrEnum):
     MIGRATION_LINEAGE = "MIGRATION_LINEAGE"
     """A database migration's own record of a rename (e.g. ALTER TABLE ... RENAME)."""
 
+    DECLARATION_LINEAGE = "DECLARATION_LINEAGE"
+    """A declaration that disappeared and one that appeared, in the same
+    revision, in the same containing entity, with no other candidate on
+    either side -- an adapter's own before/after comparison of a file's
+    declarations (`identity/declaration_evidence.py`), not Git's file-level
+    rename heuristic (`GIT_RENAME`) and not a migration tool's own record
+    (`MIGRATION_LINEAGE`). Deliberately unrelated to name or content
+    similarity: the evidence is "this was the only thing that could have
+    become that thing here", not "these look alike". A second candidate on
+    either side, or a containing entity that cannot itself be matched,
+    means no claim is proposed at all — see the module for exactly which
+    cases stay silent."""
+
     QUALIFIED_NAME = "QUALIFIED_NAME"
     """Same fully-qualified name. Common, but names get reused across files."""
 

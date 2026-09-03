@@ -103,6 +103,7 @@ class GitAdapter:
             for change in changes:
                 obs, ev = _file_change_records(
                     change,
+                    repo=repo,
                     system_id=system_id,
                     from_revision=since_revision,
                     to_revision=until,
@@ -164,6 +165,7 @@ def _commit_records(
 def _file_change_records(
     change: FileChange,
     *,
+    repo: GitRepository,
     system_id: SystemID,
     from_revision: str,
     to_revision: str,
@@ -185,6 +187,15 @@ def _file_change_records(
         locator=change.path,
         observed_at=now,
     )
+    # A MODIFIED (not renamed) file's content *before* this change is the
+    # raw material a later, declaration-level diff needs (e.g. did a
+    # SQLAlchemy column disappear and a new one appear in its place?) --
+    # this adapter reports the content only, never an interpretation of
+    # what changed within it (see identity/declaration_evidence.py, which
+    # is where that interpretation happens). Fetched only for MODIFIED,
+    # since a RENAMED/ADDED/DELETED file's "before" state is either a
+    # different path (already handled by GIT_RENAME evidence) or absent.
+    old_content = repo.show(from_revision, change.path) if change.status == "MODIFIED" else None
     observation = Observation(
         system_id=system_id,
         adapter="git@0.1.0",
@@ -197,6 +208,7 @@ def _file_change_records(
             "similarity": change.similarity,
             "from_revision": from_revision,
             "to_revision": to_revision,
+            "old_content": old_content,
         },
         evidence_ids=[evidence.id],
         revision=to_revision,

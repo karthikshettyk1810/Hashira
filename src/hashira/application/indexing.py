@@ -111,7 +111,7 @@ from typing import Protocol
 
 from .. import identity
 from ..core.entities import Entity
-from ..core.enums import RelationshipType, SnapshotStatus
+from ..core.enums import Confidence, RelationshipType, SnapshotStatus
 from ..core.events import Event
 from ..core.evidence import Evidence, Inference, Observation
 from ..core.ids import SystemID
@@ -119,7 +119,7 @@ from ..core.relationships import Relationship
 from ..core.revisions import Revision
 from ..core.schema import IR_VERSION
 from ..core.snapshots import Snapshot, SnapshotStatistics
-from ..identity import GitRename
+from ..identity import DeclarationRename, GitRename
 from ..ports.adapters import (
     DataAdapter,
     ExtractionResult,
@@ -210,34 +210,14 @@ class IndexingService:
             all_evidence.extend(extraction.evidence)
             errors.extend(extraction.errors)
 
-        # Framework adapters enrich what the language adapters already found
-        # — they never re-derive it. `base` is a read-only snapshot of the
-        # language-level result so far; each adapter's `enrich()` returns
-        # only its own additions (see adapters/django/adapter.py), which get
-        # folded into the same running lists everything else here uses.
-        for framework_adapter in self._framework_adapters:
-            base = ExtractionResult(
-                observations=list(all_observations), evidence=list(all_evidence)
-            )
-            addition = framework_adapter.enrich(root, base, system_id=system_id, revision=revision)
-            all_observations.extend(addition.observations)
-            all_evidence.extend(addition.evidence)
-            errors.extend(addition.errors)
-
-        # Data adapters enrich the same running result, after framework
-        # adapters -- but must not depend on one having run. A DataAdapter's
-        # whole point is to mean the same thing whether or not any
-        # framework adapter is even configured (see ports/adapters.py's
-        # `DataAdapter` docstring).
-        for data_adapter in self._data_adapters:
-            base = ExtractionResult(
-                observations=list(all_observations), evidence=list(all_evidence)
-            )
-            addition = data_adapter.enrich(root, base, system_id=system_id, revision=revision)
-            all_observations.extend(addition.observations)
-            all_evidence.extend(addition.evidence)
-            errors.extend(addition.errors)
-
+        # History adapters run next, before framework/data adapters -- their
+        # raw facts (commits, file changes, a MODIFIED file's prior content)
+        # are exactly the kind of thing a later enricher's own identity
+        # evidence needs to see (adapters/sqlalchemy/adapter.py's
+        # declaration-rename detection reads `git.file_change` observations
+        # out of its own `base`). `renames`/`revisions` below stay handled
+        # exactly as before; this reordering only changes what is visible
+        # to `enrich()`, not the identity/revision pipeline itself.
         renames: list[GitRename] = []
         revisions: list[Revision] = []
         for history_adapter in self._history_adapters:
@@ -254,6 +234,36 @@ class IndexingService:
             renames.extend(_extract_renames(history.observations))
             revisions.extend(_extract_revisions(history.observations, system_id=system_id))
 
+        # Framework adapters enrich what the language/history adapters
+        # already found — they never re-derive it. `base` is a read-only
+        # snapshot of the result so far; each adapter's `enrich()` returns
+        # only its own additions (see adapters/django/adapter.py), which get
+        # folded into the same running lists everything else here uses.
+        for framework_adapter in self._framework_adapters:
+            base = ExtractionResult(
+                observations=list(all_observations), evidence=list(all_evidence)
+            )
+            addition = framework_adapter.enrich(root, base, system_id=system_id, revision=revision)
+            all_observations.extend(addition.observations)
+            all_evidence.extend(addition.evidence)
+            errors.extend(addition.errors)
+
+        # Data adapters enrich the same running result, after framework
+        # adapters -- but must not depend on one having run. A DataAdapter's
+        # whole point is to mean the same thing whether or not any
+        # framework adapter is even configured (see ports/adapters.py's
+        # `DataAdapter` docstring).
+        declaration_renames: list[DeclarationRename] = []
+        for data_adapter in self._data_adapters:
+            base = ExtractionResult(
+                observations=list(all_observations), evidence=list(all_evidence)
+            )
+            addition = data_adapter.enrich(root, base, system_id=system_id, revision=revision)
+            all_observations.extend(addition.observations)
+            all_evidence.extend(addition.evidence)
+            errors.extend(addition.errors)
+            declaration_renames.extend(_extract_declaration_renames(addition.observations))
+
         run = self._normalize(all_observations, system_id=system_id, revision=revision)
 
         with self._uow_factory() as uow:
@@ -268,6 +278,7 @@ class IndexingService:
                 evidence=all_evidence,
                 events=all_events,
                 renames=renames,
+                declaration_renames=declaration_renames,
                 revisions=revisions,
                 unresolved_count=len(run.unresolved),
                 files_processed=files_processed,
@@ -298,6 +309,7 @@ class IndexingService:
         evidence: list[Evidence],
         events: list[Event],
         renames: list[GitRename],
+        declaration_renames: list[DeclarationRename],
         revisions: list[Revision],
         unresolved_count: int,
         files_processed: int,
@@ -322,6 +334,14 @@ class IndexingService:
             # itself; it only makes the connection visible to the resolver.
             candidates, existing_pool = identity.attach_rename_evidence(
                 candidates, existing_pool, renames
+            )
+        if declaration_renames:
+            # Same shape, one level down: a declaration renamed within a
+            # file Git never reported as moved at all
+            # (identity/declaration_evidence.py) — an adapter's own
+            # before/after comparison, not Git's file-level heuristic.
+            candidates, existing_pool = identity.attach_declaration_lineage_evidence(
+                candidates, existing_pool, declaration_renames
             )
         existing_by_id = {e.id: e for e in existing_pool}
 
@@ -422,7 +442,19 @@ class IndexingService:
         seen_ids: set[str] = set()
         for entity in entities:
             for rel in uow.graph.get_relationships(entity.id, direction="out"):
-                if rel.id in seen_ids or not rel.is_current:
+                if (
+                    rel.id in seen_ids
+                    or not rel.is_current
+                    or rel.type is RelationshipType.SUPERSEDES
+                ):
+                    # SUPERSEDES is a one-time historical fact, not a
+                    # recurring structural observation (see the docstring
+                    # above) -- `observed` never contains one, so without
+                    # this exclusion every existing lineage edge reads as
+                    # "no longer observed" on the very next unrelated
+                    # re-index and gets closed, silently erasing identity
+                    # lineage `application.history`/`application.impact`
+                    # both depend on being permanent.
                     continue
                 seen_ids.add(rel.id)
                 previous_by_key[(rel.source_entity_id, rel.target_entity_id, rel.type)] = rel
@@ -457,6 +489,36 @@ def _extract_renames(observations: Sequence[Observation]) -> list[GitRename]:
             renames.append(
                 GitRename(old_path=old_path, new_path=new_path, similarity=float(similarity))
             )
+    return renames
+
+
+def _extract_declaration_renames(observations: Sequence[Observation]) -> list[DeclarationRename]:
+    """Pull `DeclarationRename` value objects out of a `DataAdapter`'s raw
+    ``*.declaration_rename`` observations (today, only
+    `adapters.sqlalchemy.adapter`'s) — the shape
+    `identity.attach_declaration_lineage_evidence` actually wants, decoupled
+    from any one adapter's payload dict layout, exactly like `_extract_renames`
+    above does for Git's own rename evidence."""
+    renames: list[DeclarationRename] = []
+    for obs in observations:
+        if not obs.kind.endswith(".declaration_rename"):
+            continue
+        table = obs.payload.get("table_name")
+        old_field = obs.payload.get("old_field_name")
+        new_field = obs.payload.get("new_field_name")
+        if not (
+            isinstance(table, str) and isinstance(old_field, str) and isinstance(new_field, str)
+        ):
+            continue
+        confidence = Confidence.CERTAIN if obs.payload.get("shape_matched") else Confidence.LIKELY
+        renames.append(
+            DeclarationRename(
+                container_qualified_name=table,
+                old_qualified_name=f"{table}.{old_field}",
+                new_qualified_name=f"{table}.{new_field}",
+                confidence=confidence,
+            )
+        )
     return renames
 
 

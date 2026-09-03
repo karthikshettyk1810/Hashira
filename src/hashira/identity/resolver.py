@@ -28,12 +28,13 @@ trusting on its own:
   makes an unchanged file re-index resolve as ``MATCHED`` instead of minting
   a new entity generation on every run, without weakening the guard against
   qualified names colliding by coincidence elsewhere in the graph.
-* **Corroborating** — ``GIT_RENAME``, ``MIGRATION_LINEAGE``, ``QUALIFIED_NAME``.
-  One of these alone justifies recording lineage (a new entity, linked to the
-  old one by ``SUPERSEDES``) but not an outright merge — a qualified name can
-  be reused across an unrelated file, so identity must not hinge on it alone.
-  Two independent signals from this tier (or one of these plus a low-confidence
-  strong signal) corroborate each other and *do* justify a merge.
+* **Corroborating** — ``GIT_RENAME``, ``MIGRATION_LINEAGE``, ``DECLARATION_LINEAGE``,
+  ``QUALIFIED_NAME``. One of these alone justifies recording lineage (a new
+  entity, linked to the old one by ``SUPERSEDES``) but not an outright merge —
+  a qualified name can be reused across an unrelated file, so identity must
+  not hinge on it alone. Two independent signals from this tier (or one of
+  these plus a low-confidence strong signal) corroborate each other and *do*
+  justify a merge.
 * **Weak** — ``STRUCTURAL_SIMILARITY``. Never enough by itself, and never
   promotes a corroborating signal either; it exists so an adapter can record a
   hunch without that hunch being mistaken for evidence.
@@ -102,6 +103,7 @@ _CORROBORATING: frozenset[IdentityClaimKind] = frozenset(
     {
         IdentityClaimKind.GIT_RENAME,
         IdentityClaimKind.MIGRATION_LINEAGE,
+        IdentityClaimKind.DECLARATION_LINEAGE,
         IdentityClaimKind.QUALIFIED_NAME,
     }
 )

@@ -177,6 +177,19 @@ class GitRepository:
             return _parse_name_status_z(output)
         return self.changed_paths(info.parent_shas[0], revision)
 
+    def show(self, revision: str, path: str) -> str | None:
+        """A file's exact content at one revision, or `None` if it did not
+        exist there (a newly-added file, a typo'd path, a path that only
+        exists on another branch). This is the raw material a later,
+        declaration-level diff is built from (`adapters/sqlalchemy/adapter.py`'s
+        old-vs-new column comparison) — this method reports content only,
+        never an interpretation of what changed within it.
+        """
+        try:
+            return run_git(["show", f"{revision}:{path}"], cwd=self.root)
+        except GitCommandError:
+            return None
+
 
 #: The well-known empty-tree object id, valid in every Git repository —
 #: needed to diff a root commit (one with no parent) against "nothing".

@@ -444,6 +444,22 @@ in one `IndexingService` run
 fully-connected graph from the HTTP route down to the database column with
 no FastAPI-SQLAlchemy-specific code anywhere.
 
+**A column renamed within an unchanged file, closed in a later pass, with
+its own mechanism.** Git's rename detection is file-level; it has nothing
+to detect when a declaration changes but the file never moves.
+`_detect_declaration_renames` re-parses a `MODIFIED` file's content *before*
+the current revision (`GitAdapter` attaches it to `git.file_change` when
+available) with this adapter's own column extraction, and compares old
+columns to new. Only an unambiguous 1:1 disappearance/appearance in the
+same table, with the same type family, is reported as a
+`sqlalchemy.declaration_rename` fact —
+`identity/declaration_evidence.py::attach_declaration_lineage_evidence` is
+what turns that into a `DECLARATION_LINEAGE` claim (`docs/IR.md`'s entry on
+that milestone has the full story, including a real, pre-existing bug in
+relationship reconciliation this surfaced). A name change alongside a
+type-family change is treated as insufficient evidence, not weaker
+evidence — this adapter never guesses from a name alone.
+
 **Watching for real convergence, not refactoring speculatively.** Django's
 model/field handling and SQLAlchemy's model/column handling now both exist,
 independently, and both reach for the same shape of concept — a data
