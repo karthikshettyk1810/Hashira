@@ -58,7 +58,11 @@ _INSTRUCTIONS = (
     "entities and relationships, queryable at any indexed revision. Start "
     "with search_entities to find an id if you do not already have one. "
     "Every relationship carries its own confidence and evidence -- prefer "
-    "trusting what a tool actually returned over inferring from names alone."
+    "trusting what a tool actually returned over inferring from names alone. "
+    "reverse_impact/forward_impact also return a coverage field -- check "
+    "it before treating a short or empty result as proof nothing else is "
+    "affected; PARTIAL coverage means known blind spots exist, not that "
+    "the search came up empty."
 )
 
 
@@ -159,7 +163,15 @@ def build_server(
         evidence, confidence, revision -- never collapsed to a flat list of
         names. `entity_id` may name an entity a later revision superseded;
         the result's `resolved_from` says so if lineage was followed to
-        answer this."""
+        answer this.
+
+        Always check `coverage` before treating `paths` as exhaustive.
+        `coverage.status` is "PARTIAL" whenever `coverage.unresolved_access_count`
+        is nonzero or `coverage.limitations` is non-empty -- a short or even
+        empty `paths` list under PARTIAL coverage means "this is what was
+        found," not "this is everything that exists." `coverage.limitations`
+        names concrete blind spots (e.g. raw SQL, an unsupported way of
+        typing a variable) that this call cannot see at all."""
         try:
             types = _parse_relationship_types(edge_types)
         except ValueError as exc:
@@ -185,7 +197,8 @@ def build_server(
     ) -> dict[str, Any]:
         """What does `entity_id`, directly or transitively, depend on? The
         mirror of `reverse_impact` -- same lossless path/hop shape, same
-        identity-lineage-aware `entity_id` resolution."""
+        identity-lineage-aware `entity_id` resolution, same `coverage`
+        caveat: check it before treating `paths` as exhaustive."""
         try:
             types = _parse_relationship_types(edge_types)
         except ValueError as exc:
