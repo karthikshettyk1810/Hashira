@@ -33,10 +33,11 @@ class LimitationKind(StrEnum):
     IR contract (`core/schema.py::IR_MODELS`).
 
     Grows one real, adapter-reported case at a time -- never speculatively
-    ahead of an adapter that actually hits it. A dynamic-dispatch or
-    framework-reflection kind, for instance, belongs here only once some
-    adapter's analysis genuinely needs to report one, not in advance of
-    that (`docs/IR.md`'s entry on this milestone has the reasoning)."""
+    ahead of an adapter that actually hits it: `DYNAMIC_DISPATCH` and
+    `FRAMEWORK_REFLECTION` below were added only once a real agent
+    experiment independently rediscovered both as live, undisclosed gaps
+    -- twice, on two separate re-runs -- not in advance of that evidence
+    (`docs/IR.md`'s entry on this milestone has the full account)."""
 
     RAW_SQL = "RAW_SQL"
     """A read or write expressed as a raw query string (e.g.
@@ -65,6 +66,24 @@ class LimitationKind(StrEnum):
     `getattr(obj, variable)`/`getattr(obj, mapping[key])`, each requiring
     a different, unbounded kind of guessing. Reported so the access does
     not vanish silently, not because resolving it is hard."""
+    DYNAMIC_DISPATCH = "DYNAMIC_DISPATCH"
+    """A call whose target is resolved at runtime -- `getattr(obj,
+    method_name)(...)`, a dispatch table, anything not a literal
+    `obj.method(...)` the call graph can read directly -- rather than
+    through the ORM field-access forms above. Not attempted per-call-site
+    (that would require the same unbounded guessing
+    `DYNAMIC_ATTRIBUTE_ACCESS` already refuses); declared structurally, by
+    whichever adapter owns call-graph construction (`PythonAdapter`),
+    since the gap applies to any call, not only ones touching a mapped
+    field."""
+    FRAMEWORK_REFLECTION = "FRAMEWORK_REFLECTION"
+    """A framework's own runtime mechanism (e.g. Pydantic's `orm_mode`
+    reading an ORM attribute to serialize a response model) reads or
+    writes a mapped field with no source-level attribute access for any
+    adapter to see at all -- not a provenance gap (there is nothing to
+    resolve; the access never appears as code), but a distinct, structural
+    boundary declared by whichever framework adapter owns the reflection
+    mechanism in question."""
 
 
 class LimitationScope(StrEnum):
@@ -84,6 +103,15 @@ class LimitationScope(StrEnum):
     """Whether a data entity/field is referenced from a raw query string
     rather than through the ORM at all -- a different surface, not
     analyzed by walking Python attribute access."""
+    CALL_RESOLUTION = "CALL_RESOLUTION"
+    """Whether a call's target can be traced at all, independent of what
+    happens once reached -- a different question from whether a *field*
+    access can be traced."""
+    FRAMEWORK_SERIALIZATION = "FRAMEWORK_SERIALIZATION"
+    """Whether a framework's own runtime mechanism touches a mapped field
+    with no corresponding source-level access -- structurally different
+    from both ORM attribute access and raw SQL: there is no code for
+    either of those analyses to examine in the first place."""
 
 
 class Limitation(BaseModel):

@@ -13,7 +13,7 @@ from hashira.adapters.fastapi import FastAPIAdapter
 from hashira.adapters.python import PythonAdapter
 from hashira.adapters.python.discovery import discover_python_files
 from hashira.core.ids import IDPrefix, new_id
-from hashira.ports.adapters import ExtractionResult
+from hashira.ports.adapters import ExtractionResult, LimitationKind, LimitationScope
 
 
 @pytest.fixture
@@ -291,3 +291,17 @@ def test_no_fastapi_shaped_code_produces_no_observations(tmp_path: Path, system_
     addition = FastAPIAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
     assert addition.observations == []
     assert addition.errors == []
+
+
+def test_capabilities_state_framework_reflection_as_a_known_limitation() -> None:
+    """A response model reading a mapped attribute via Pydantic's own
+    orm_mode reflection (no source-level access to see at all) is a real,
+    undisclosed gap a live agent experiment found twice
+    (`docs/IR.md`'s "field-access coverage audit" entry) -- declared here,
+    unconditionally, rather than left silent."""
+    limitations = FastAPIAdapter().capabilities().known_limitations
+    assert any(
+        limitation.kind is LimitationKind.FRAMEWORK_REFLECTION
+        and limitation.scope is LimitationScope.FRAMEWORK_SERIALIZATION
+        for limitation in limitations
+    )

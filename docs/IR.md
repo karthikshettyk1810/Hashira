@@ -678,3 +678,42 @@ evidence points at a known, declared gap" — closer in spirit to
 `COMPLETE_WITHIN_DECLARED_CAPABILITIES` than to "there cannot possibly be
 another dependency." No renaming is needed yet, but any future caller
 reasoning about `COMPLETE` should read it that way, not more strongly.
+
+## Closing the disclosure gap: `DYNAMIC_DISPATCH` and `FRAMEWORK_REFLECTION`
+
+A fourth re-run of the same agent experiment, this time asked explicitly
+to hunt for anything unmodeled *and* undisclosed, independently
+rediscovered the exact two gaps this document had already logged as
+deliberately deferred: dynamic dispatch (`OrderService.complete`'s
+`getattr(self.payments, method_name)`, confirmed absent as a `CALLS` edge
+in both directions) and framework reflection (`PaymentOut`'s Pydantic
+`orm_mode` reading `.status` with no source-level access anywhere,
+confirmed absent as a `READS` edge). Nothing outside the already-documented
+taxonomy emerged across four independent passes — a real signal that the
+taxonomy itself has stabilized.
+
+But "known to the people who wrote the adapter" and "disclosed to an
+agent calling the tool" turned out to be different claims. Both gaps were
+already correct in `docs/IR.md`'s own prose; neither was ever
+reachable from `AdapterCapabilities.known_limitations` at runtime, so an
+agent still had to rediscover them by hand — the same "declared limitation
+≠ exhaustive limitation inventory" problem the v0.4 audit exists to close,
+one layer further out.
+
+**The fix is the same shape as the audit itself, deliberately minimal**:
+add `DYNAMIC_DISPATCH` and `FRAMEWORK_REFLECTION` as two more
+`LimitationKind` members, declared **structurally and unconditionally** --
+no per-call-site detection, no conditional per-entity attachment, no
+change to `Confidence`, no new AST analysis. `PythonAdapter` declares
+`DYNAMIC_DISPATCH` (`LimitationScope.CALL_RESOLUTION`): it owns `CALLS`
+edge construction, and the gap applies to any call, not only ones
+touching a mapped field, so it belongs there rather than on
+`SQLAlchemyAdapter`. `FastAPIAdapter` declares `FRAMEWORK_REFLECTION`
+(`LimitationScope.FRAMEWORK_SERIALIZATION`): it owns response-model
+handling, the mechanism actually responsible for the reflection in
+question. A caller asking about any entity in a system with both adapters
+configured now sees all three structural gaps (`RAW_SQL`,
+`DYNAMIC_DISPATCH`, `FRAMEWORK_REFLECTION`) alongside whatever conditional
+gaps apply to that specific entity — an honest, if still incomplete,
+account of Hashira's current capability boundary, rather than a partial
+one that reads as more complete than it is.

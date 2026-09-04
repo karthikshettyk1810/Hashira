@@ -830,6 +830,23 @@ core rather than the adapter.
     some limitations we happen to know about" -- only then does beating
     the ~55k-token no-Hashira baseline become a reasonable expectation
     rather than a hope.
+  - **The fourth re-run closed the loop, and completed this milestone's
+    own contract.** It independently rediscovered exactly the two gaps
+    already logged above -- dynamic dispatch and framework reflection --
+    and nothing outside the documented taxonomy across four passes: the
+    taxonomy itself has stabilized. But both were correct in this
+    document's own prose and still unreachable from
+    `AdapterCapabilities.known_limitations` at runtime, so an agent still
+    had to rediscover them by hand. Closed with the smallest possible
+    change: `DYNAMIC_DISPATCH` (`PythonAdapter`, which owns `CALLS`-edge
+    construction) and `FRAMEWORK_REFLECTION` (`FastAPIAdapter`, which owns
+    response-model handling) join `RAW_SQL` as structural, unconditional
+    `known_limitations` -- no per-call-site detection, no conditional
+    per-entity attachment, no `Confidence` change, no new AST analysis.
+    `docs/IR.md`'s "closing the disclosure gap" entry has the full
+    account. This is part of Impact Analysis v0.4, not a new milestone --
+    it completes the disclosure contract v0.4 already committed to,
+    rather than opening a new one.
 
 ## Phase 4 — Agent integration
 

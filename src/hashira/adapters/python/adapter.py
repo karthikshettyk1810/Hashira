@@ -15,7 +15,13 @@ from pathlib import Path
 
 from ...core.enums import EntityType, RelationshipType
 from ...core.ids import SystemID
-from ...ports.adapters import AdapterCapabilities, ExtractionResult
+from ...ports.adapters import (
+    AdapterCapabilities,
+    ExtractionResult,
+    Limitation,
+    LimitationKind,
+    LimitationScope,
+)
 from .discovery import discover_python_files, import_root_for
 from .extractor import extract_file
 
@@ -48,6 +54,18 @@ class PythonAdapter:
                 RelationshipType.EXTENDS,
             ],
             requires_network=False,
+            known_limitations=[
+                Limitation(
+                    kind=LimitationKind.DYNAMIC_DISPATCH,
+                    scope=LimitationScope.CALL_RESOLUTION,
+                    detail=(
+                        "A call whose target is resolved at runtime (e.g. "
+                        "getattr(obj, method_name)(...), a dispatch table) is "
+                        "not represented as a CALLS edge -- only a literal "
+                        "obj.method(...) call is."
+                    ),
+                ),
+            ],
         )
 
     def detect(self, root: Path) -> bool:

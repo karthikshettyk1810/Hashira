@@ -57,7 +57,13 @@ from ...core.base import SourceRef
 from ...core.enums import Origin
 from ...core.evidence import Evidence, Observation
 from ...core.ids import SystemID
-from ...ports.adapters import AdapterCapabilities, ExtractionResult
+from ...ports.adapters import (
+    AdapterCapabilities,
+    ExtractionResult,
+    Limitation,
+    LimitationKind,
+    LimitationScope,
+)
 from .._python_index import PythonIndex, PythonTreeCache
 from ..python.resolve import ResolutionContext, resolve_expr
 from .known_symbols import (
@@ -101,6 +107,18 @@ class FastAPIAdapter:
             # No entity_types/relationship_types: like DjangoAdapter, this
             # produces Observations only -- normalizer.py builds the graph.
             requires_network=False,
+            known_limitations=[
+                Limitation(
+                    kind=LimitationKind.FRAMEWORK_REFLECTION,
+                    scope=LimitationScope.FRAMEWORK_SERIALIZATION,
+                    detail=(
+                        "A response model reading a mapped attribute via "
+                        "Pydantic's own orm_mode/from_attributes reflection "
+                        "(rather than an explicit `.field` access in source) "
+                        "is not represented as a READS edge."
+                    ),
+                ),
+            ],
         )
 
     def detect(self, root: Path) -> bool:

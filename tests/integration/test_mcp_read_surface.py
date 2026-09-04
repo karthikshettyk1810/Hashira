@@ -189,6 +189,13 @@ def test_agent_discovers_impact_and_lineage_through_the_wire_protocol(
         limitation["kind"] == "RAW_SQL" and "raw sql" in limitation["detail"].lower()
         for limitation in coverage["limitations"]
     )
+    # The two structural gaps a real agent experiment independently
+    # rediscovered as undisclosed (docs/IR.md's "field-access coverage
+    # audit" entry) are now disclosed too, from whichever adapter owns
+    # each: PythonAdapter (call resolution) and FastAPIAdapter (response
+    # serialization) -- both configured in this same indexing run.
+    kinds_present = {limitation["kind"] for limitation in coverage["limitations"]}
+    assert kinds_present == {"RAW_SQL", "DYNAMIC_DISPATCH", "FRAMEWORK_REFLECTION"}
 
     # get_entity confirms the same id independently, with full context.
     entity_payload = asyncio.run(_call(server, "get_entity", {"entity_id": status_id}))
