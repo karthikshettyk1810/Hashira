@@ -33,6 +33,7 @@ from hashira.mcp.serialize import (
     serialize_lineage_result,
     serialize_relationship,
 )
+from hashira.ports.adapters import Limitation, LimitationKind, LimitationScope
 
 _SYSTEM = System(name="Checkout", slug="checkout-serialize")
 
@@ -95,8 +96,13 @@ def test_serialize_impact_result_preserves_every_hop() -> None:
     path = ImpactPath(hops=(hop1, hop2), endpoint=c)
     coverage = ImpactCoverage(
         status=CoverageStatus.PARTIAL,
-        unresolved_access_count=2,
-        limitations=("raw SQL is not analyzed",),
+        limitations=(
+            Limitation(
+                kind=LimitationKind.RAW_SQL,
+                scope=LimitationScope.FIELD_ACCESS,
+                detail="raw SQL is not analyzed",
+            ),
+        ),
     )
     result = ImpactResult(
         direction="forward",
@@ -119,8 +125,9 @@ def test_serialize_impact_result_preserves_every_hop() -> None:
     assert dumped["affected_entity_ids"] == [c.id]
     assert dumped["coverage"] == {
         "status": "PARTIAL",
-        "unresolved_access_count": 2,
-        "limitations": ["raw SQL is not analyzed"],
+        "limitations": [
+            {"kind": "RAW_SQL", "scope": "FIELD_ACCESS", "detail": "raw SQL is not analyzed"}
+        ],
     }
 
 

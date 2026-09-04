@@ -14,7 +14,7 @@ from hashira.adapters.python.discovery import discover_python_files
 from hashira.adapters.sqlalchemy import SQLAlchemyAdapter
 from hashira.core import Observation, Origin
 from hashira.core.ids import IDPrefix, new_id
-from hashira.ports.adapters import ExtractionResult
+from hashira.ports.adapters import ExtractionResult, LimitationKind, LimitationScope
 
 
 @pytest.fixture
@@ -332,6 +332,126 @@ def test_field_write_via_typed_parameter_is_detected(tmp_path: Path, system_id: 
     assert _by_kind(addition, "sqlalchemy.unresolved_field_access") == []
 
 
+def test_field_write_via_return_value_provenance_is_detected(
+    tmp_path: Path, system_id: str
+) -> None:
+    """`payment = repo.get(payment_id)` -- the third "typed object
+    provenance" form: `repo`'s own type comes from a typed parameter
+    (already proven), and `repo.get`'s return type (`-> Payment`,
+    annotated, defined in a *different* file) resolves `payment`."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/repository.py",
+        "from .models import Payment\n\n\n"
+        "class PaymentRepository:\n"
+        "    def get(self, payment_id: int) -> Payment:\n"
+        "        return Payment()\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "from .repository import PaymentRepository\n\n\n"
+        "class PaymentService:\n"
+        "    def close(self, repo: PaymentRepository, payment_id: int) -> str:\n"
+        "        payment = repo.get(payment_id)\n"
+        '        payment.status = "closed"\n'
+        "        return payment.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    accesses = _by_kind(addition, "sqlalchemy.field_access")
+    kinds = {a.payload["access_kind"] for a in accesses}
+    assert kinds == {"READ", "WRITE"}
+    assert all(a.payload["column_qualified_name"] == "payments.status" for a in accesses)
+    assert _by_kind(addition, "sqlalchemy.unresolved_field_access") == []
+
+
+def test_unresolved_access_reported_for_return_value_with_no_annotation(
+    tmp_path: Path, system_id: str
+) -> None:
+    """`repo`'s own type is known (typed parameter), but `repo.get`'s
+    return type is unannotated -- recognized as return-value-sourced and
+    plausibly relevant, but reported as unresolved with
+    `RETURN_VALUE_PROVENANCE`, not silently dropped."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/repository.py",
+        "class PaymentRepository:\n    def get(self, payment_id):\n        return None\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "from .repository import PaymentRepository\n\n\n"
+        "class PaymentService:\n"
+        "    def close(self, repo: PaymentRepository, payment_id: int) -> str:\n"
+        "        payment = repo.get(payment_id)\n"
+        "        return payment.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.field_access") == []
+    unresolved = _by_kind(addition, "sqlalchemy.unresolved_field_access")
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["attribute_name"] == "status"
+    assert unresolved[0].payload["limitation_kind"] == LimitationKind.RETURN_VALUE_PROVENANCE.value
+
+
+def test_return_value_provenance_not_claimed_for_a_callee_of_unknown_type(
+    tmp_path: Path, system_id: str
+) -> None:
+    """The precision guard, one level up: a method call on an object whose
+    *own* type cannot be resolved at all (an external SDK's client, say)
+    must not be treated as return-value provenance -- that is a different,
+    deeper gap than this mechanism claims to cover, so the resulting local
+    variable is neither resolved nor reported as unresolved."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/gateway.py",
+        "import external_sdk\n\n"
+        "_client = external_sdk.Client()\n\n\n"
+        "def charge():\n"
+        "    result = _client.charge()\n"
+        "    return result.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.field_access") == []
+    assert _by_kind(addition, "sqlalchemy.unresolved_field_access") == []
+
+
 def test_unresolved_access_reported_for_untyped_parameter_matching_a_known_column(
     tmp_path: Path, system_id: str
 ) -> None:
@@ -362,6 +482,7 @@ def test_unresolved_access_reported_for_untyped_parameter_matching_a_known_colum
     assert len(unresolved) == 1
     assert unresolved[0].payload["attribute_name"] == "status"
     assert unresolved[0].payload["accessor_qualified_name"] == "payments.worker.sync"
+    assert unresolved[0].payload["limitation_kind"] == LimitationKind.UNTYPED_PARAMETER.value
 
 
 def test_unresolved_access_not_reported_for_an_attribute_name_no_model_has(
@@ -394,7 +515,12 @@ def test_unresolved_access_not_reported_for_an_attribute_name_no_model_has(
 
 def test_capabilities_state_known_limitations() -> None:
     limitations = SQLAlchemyAdapter().capabilities().known_limitations
-    assert any("raw sql" in limitation.lower() for limitation in limitations)
+    assert any(
+        limitation.kind is LimitationKind.RAW_SQL
+        and limitation.scope is LimitationScope.FIELD_ACCESS
+        and "raw sql" in limitation.detail.lower()
+        for limitation in limitations
+    )
 
 
 # --- declaration-rename detection (identity/declaration_evidence.py's raw material) --

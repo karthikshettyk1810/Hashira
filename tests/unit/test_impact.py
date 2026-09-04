@@ -33,6 +33,7 @@ from hashira.core import (
     SourceRef,
     System,
 )
+from hashira.ports.adapters import Limitation, LimitationKind, LimitationScope
 from hashira.storage.memory import MemoryDatabase
 
 
@@ -577,15 +578,15 @@ def test_impact_analyzer_delegates_follow_lineage_too(db: MemoryDatabase, system
     assert result.predecessors[0].predecessor.id == a.id
 
 
-# --- coverage (Impact Analysis v0.2) -----------------------------------------
+# --- coverage (Impact Analysis v0.2/v0.3) -------------------------------------
 
 
-def test_coverage_is_complete_with_no_snapshot_and_no_unresolved_metadata(
+def test_coverage_is_complete_with_no_snapshot_and_no_limitation_metadata(
     db: MemoryDatabase, system: System
 ) -> None:
     """No snapshot recorded at all (as in every other test in this file,
-    which never index anything), no `unresolved_access_count` on the start
-    entity -- coverage has nothing to report and reads COMPLETE."""
+    which never index anything), no `coverage_limitation_kinds` on the
+    start entity -- coverage has nothing to report and reads COMPLETE."""
     a = _entity(system, "a")
     b = _entity(system, "b")
     ev = _evidence(system)
@@ -595,14 +596,15 @@ def test_coverage_is_complete_with_no_snapshot_and_no_unresolved_metadata(
         result = reverse_impact(uow, system_id=system.id, entity_id=b.id)
 
     assert result.coverage.status is CoverageStatus.COMPLETE
-    assert result.coverage.unresolved_access_count == 0
     assert result.coverage.limitations == ()
 
 
-def test_coverage_reflects_unresolved_access_count_on_the_start_entity(
+def test_coverage_reflects_limitation_kinds_on_the_start_entity(
     db: MemoryDatabase, system: System
 ) -> None:
-    field = _entity(system, "field").model_copy(update={"metadata": {"unresolved_access_count": 3}})
+    field = _entity(system, "field").model_copy(
+        update={"metadata": {"coverage_limitation_kinds": ["RETURN_VALUE_PROVENANCE"]}}
+    )
     caller = _entity(system, "caller")
     ev = _evidence(system)
     _seed(
@@ -616,17 +618,45 @@ def test_coverage_reflects_unresolved_access_count_on_the_start_entity(
     with db.unit_of_work() as uow:
         result = reverse_impact(uow, system_id=system.id, entity_id=field.id)
 
-    assert result.coverage.unresolved_access_count == 3
     assert result.coverage.status is CoverageStatus.PARTIAL
+    assert len(result.coverage.limitations) == 1
+    limitation = result.coverage.limitations[0]
+    assert limitation.kind is LimitationKind.RETURN_VALUE_PROVENANCE
+    assert limitation.scope is LimitationScope.FIELD_ACCESS
+    assert limitation.detail
 
 
-def test_coverage_reads_limitations_off_the_latest_complete_snapshot(
+def test_coverage_ignores_unknown_limitation_kind_strings(
+    db: MemoryDatabase, system: System
+) -> None:
+    """`metadata` is an untyped `dict[str, object]` boundary -- a kind
+    string this build of Hashira does not recognize (e.g. written by a
+    newer version) is skipped, not raised."""
+    field = _entity(system, "field").model_copy(
+        update={"metadata": {"coverage_limitation_kinds": ["SOME_FUTURE_KIND"]}}
+    )
+    ev = _evidence(system)
+    _seed(db, system, [field], [], [ev])
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=field.id)
+
+    assert result.coverage.status is CoverageStatus.COMPLETE
+    assert result.coverage.limitations == ()
+
+
+def test_coverage_reads_structural_limitations_off_the_latest_complete_snapshot(
     db: MemoryDatabase, system: System
 ) -> None:
     a = _entity(system, "a")
     b = _entity(system, "b")
     ev = _evidence(system)
     _seed(db, system, [a, b], [_rel(system, a, b, RelationshipType.CALLS, evidence=ev)], [ev])
+    raw_sql = Limitation(
+        kind=LimitationKind.RAW_SQL,
+        scope=LimitationScope.FIELD_ACCESS,
+        detail="raw SQL is not analyzed",
+    )
     with db.unit_of_work() as uow:
         uow.snapshots.create(
             Snapshot(
@@ -636,7 +666,7 @@ def test_coverage_reads_limitations_off_the_latest_complete_snapshot(
                 ir_version="0.1.5",
                 status=SnapshotStatus.COMPLETE,
                 diagnostics=[
-                    "limitation: raw SQL is not analyzed",
+                    f"limitation: {raw_sql.model_dump_json()}",
                     "not a limitation, some other diagnostic",
                 ],
             )
@@ -646,7 +676,7 @@ def test_coverage_reads_limitations_off_the_latest_complete_snapshot(
     with db.unit_of_work() as uow:
         result = reverse_impact(uow, system_id=system.id, entity_id=b.id)
 
-    assert result.coverage.limitations == ("raw SQL is not analyzed",)
+    assert result.coverage.limitations == (raw_sql,)
     assert result.coverage.status is CoverageStatus.PARTIAL
 
 
@@ -654,7 +684,9 @@ def test_coverage_never_changes_a_hop_s_confidence(db: MemoryDatabase, system: S
     """The invariant `docs/IR.md` states explicitly: coverage is reported
     alongside a result, never folded into `Confidence` -- a CERTAIN edge
     stays CERTAIN even when `coverage.status` is PARTIAL."""
-    field = _entity(system, "field").model_copy(update={"metadata": {"unresolved_access_count": 1}})
+    field = _entity(system, "field").model_copy(
+        update={"metadata": {"coverage_limitation_kinds": ["UNTYPED_PARAMETER"]}}
+    )
     caller = _entity(system, "caller")
     ev = _evidence(system)
     rel = _rel(

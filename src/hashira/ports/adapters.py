@@ -8,6 +8,7 @@ decide what something means at the system level — it reports what it saw.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -18,6 +19,63 @@ from ..core.enums import EntityType, RelationshipType
 from ..core.events import Event
 from ..core.evidence import Evidence, Observation
 from ..core.relationships import Relationship
+
+
+class LimitationKind(StrEnum):
+    """A capability boundary Hashira's analysis cannot see past -- one
+    *category* of missed edge, never a count of individual instances
+    (`application/impact.py`'s "coverage is not confidence" explains why:
+    a limitation must stay useful whether it applies to one access or ten
+    thousand). Closed and small on purpose, exactly like `core/enums.py`'s
+    IR vocabulary -- but kept here, in `ports/`, rather than there:
+    this describes a boundary of Hashira's *own* analysis, not a fact
+    about the system being analyzed, so it never touches the versioned
+    IR contract (`core/schema.py::IR_MODELS`).
+
+    Grows one real, adapter-reported case at a time -- never speculatively
+    ahead of an adapter that actually hits it. A dynamic-dispatch or
+    framework-reflection kind, for instance, belongs here only once some
+    adapter's analysis genuinely needs to report one, not in advance of
+    that (`docs/IR.md`'s entry on this milestone has the reasoning)."""
+
+    RAW_SQL = "RAW_SQL"
+    """A read or write expressed as a raw query string (e.g.
+    `sqlalchemy.text(...)`) rather than through the ORM -- no adapter
+    parses SQL text for column references. Structural: true regardless
+    of which entity is being asked about, so this is the one kind
+    reported unconditionally by an adapter's own `AdapterCapabilities`."""
+    UNTYPED_PARAMETER = "UNTYPED_PARAMETER"
+    """An attribute access on a function parameter whose declared type
+    (or absence of one) could not be matched to a known class."""
+    RETURN_VALUE_PROVENANCE = "RETURN_VALUE_PROVENANCE"
+    """An attribute access on a local variable assigned from a known
+    object's method call, whose own return type is unannotated or does
+    not resolve to a known model. Distinct from `UNTYPED_PARAMETER`: this
+    is "we know who was called and couldn't tell what it returns," not
+    "we don't know what this parameter is at all"."""
+
+
+class LimitationScope(StrEnum):
+    """What kind of analysis a `Limitation` bounds -- coarser than `kind`,
+    so a caller can ask "are there gaps in X" without enumerating every
+    specific kind. One value exists today because every `LimitationKind`
+    so far bounds the same thing (can Hashira tell whether a specific
+    field was read or written); the field is reserved for the day a
+    limitation exists outside field-access analysis (e.g. call-graph
+    resolution), not filled in speculatively before then."""
+
+    FIELD_ACCESS = "FIELD_ACCESS"
+
+
+class Limitation(BaseModel):
+    """One named, categorical gap in Hashira's analysis -- never a count
+    of individual missed edges. Group and filter on `kind`/`scope`;
+    `detail` is for a reader who has not memorized the enum vocabulary,
+    never the sole carrier of meaning."""
+
+    kind: LimitationKind
+    scope: LimitationScope
+    detail: str
 
 
 class AdapterCapabilities(BaseModel):
@@ -36,12 +94,17 @@ class AdapterCapabilities(BaseModel):
     relationship_types: list[RelationshipType] = Field(default_factory=list)
     requires_network: bool = False
     """True if the adapter contacts a remote service. Local-first mode refuses these (§29)."""
-    known_limitations: list[str] = Field(default_factory=list)
-    """Analytical gaps this adapter has, stated plainly (e.g. "raw SQL is not
-    analyzed"). Not a TODO list -- `application.impact` surfaces these
-    verbatim as `ImpactResult.coverage.limitations`, so an agent asking "did
-    you check everything" gets an honest answer instead of silence standing
-    in for "yes" (`docs/IR.md`'s "coverage is not confidence" entry)."""
+    known_limitations: list[Limitation] = Field(default_factory=list)
+    """This adapter's *structural* analytical gaps -- true regardless of
+    which entity a caller asks about (today: only `RAW_SQL`). A
+    *conditional* gap (only some entities are actually affected, e.g.
+    `UNTYPED_PARAMETER`/`RETURN_VALUE_PROVENANCE`) is not declared here;
+    it is reported per-entity instead, via that entity's own indexing-time
+    metadata (`application/indexing.py`) -- declaring it unconditionally
+    here would be exactly the "blanket pessimism" `docs/IR.md`'s "coverage
+    is not confidence" entry warns against. `application.impact` surfaces
+    both kinds together, undifferentiated by source, as
+    `ImpactResult.coverage.limitations`."""
 
 
 class ExtractionResult(BaseModel):

@@ -367,7 +367,7 @@ later revision, transparently follows the lineage and reports exactly what
 was truly reachable at that point — empty, in the gap between the two
 commits; the full chain again, once the usage caught up.
 
-## Coverage is not confidence — Impact Analysis v0.2
+## Coverage is not confidence — Impact Analysis v0.2/v0.3
 
 A real agent experiment run against Hashira's own MCP read surface (§27;
 `docs/ROADMAP.md`'s entry on this milestone has the full account) produced
@@ -400,14 +400,16 @@ not merely an internal one.
 - **recognized-but-unresolved** — an adapter saw something plausibly
   relevant (an attribute name matching a real column) but could not
   determine the accessing object's type through any provenance form it
-  supports, and says so, counted in `ImpactCoverage.unresolved_access_count`.
-  This is v0.2's honest, *narrower* stand-in for the ideal
-  `NOT_FOUND_AFTER_COVERAGE` state (an adapter examining a specific
-  accessor and affirmatively confirming no relevant access exists there) —
-  Hashira does not yet produce that rigorous a guarantee; what it produces
-  instead is a real, adapter-reported count of accesses it recognized as
-  ambiguous rather than either resolving or ignoring them. The distinction
-  from `NOT_OBSERVABLE` matters and must never collapse: "we looked and
+  supports, and says so — reported as one `Limitation` per distinct
+  *kind* of gap (`ports/adapters.py::LimitationKind`), never a count (v0.3;
+  see below for why a count was the wrong shape). This is Hashira's
+  honest, *narrower* stand-in for the ideal `NOT_FOUND_AFTER_COVERAGE`
+  state (an adapter examining a specific accessor and affirmatively
+  confirming no relevant access exists there) — Hashira does not yet
+  produce that rigorous a guarantee; what it produces instead is a real,
+  adapter-reported category of access it recognized as ambiguous rather
+  than either resolving or ignoring it. The distinction from
+  `NOT_OBSERVABLE` matters and must never collapse: "we looked and
   couldn't tell" is not the same claim as "there is nothing here to look
   at," and conflating them is exactly the bug the agent experiment found.
 
@@ -455,3 +457,113 @@ reporting.py` (new in the `fastapi_checkout` fixture) is a real raw-SQL
 reader over `payments.status`; `tests/integration/test_mcp_read_surface.py`
 asserts that an MCP `reverse_impact` response for that column explicitly
 names this limitation, over the real wire protocol, not just internally.
+
+## v0.3: structured limitations, and a category is not a count
+
+Re-running the exact same agent experiment after v0.2 landed produced two
+findings, one a bug and one a real design result.
+
+**The bug**: `coverage` was correct on the wire — `status: "PARTIAL"`,
+the right limitations — and the re-run agent never mentioned it. The
+cause was mundane: the `reverse_impact`/`forward_impact` MCP tool
+*descriptions* (what an agent reads via `list_tools`, before ever calling
+the tool) never said `coverage` existed. Fixed by editing those
+descriptions, nothing else (`src/hashira/mcp/server.py`). The lesson
+generalizes: correct data on the wire is necessary but not sufficient — a
+tool's own self-description is part of the epistemic contract, not
+packaging around it. An agent cannot act on a field it was never told to
+look for.
+
+**The design result**, once that confound was removed by re-running
+again: the agent used `coverage.status == "PARTIAL"` exactly as intended —
+read `limitations`, went and specifically investigated the surfaces they
+named, and *also* found a third, unnamed gap on its own (`getattr`-based
+dynamic dispatch) simply because `PARTIAL` had taught it not to trust a
+short result at face value. Its own wishlist asked, unprompted, for
+limitations "categorized by kind," and separately flagged that a
+`PaymentOut.status` Pydantic-serialization edge (implicit ORM-attribute
+reflection, no source-level `.status` access to see at all) felt like a
+different *kind* of gap than the others. Both observations were correct
+and both are why v0.2's `unresolved_access_count: int` was replaced here,
+rather than extended.
+
+**A limitation describes a capability boundary, not an individual missed
+edge.** `ImpactCoverage.limitations` is now `tuple[Limitation, ...]`
+(`ports/adapters.py`): `Limitation{kind, scope, detail}`, where `kind` is
+a closed `LimitationKind` vocabulary (`RAW_SQL`, `UNTYPED_PARAMETER`,
+`RETURN_VALUE_PROVENANCE` today), `scope` is a coarser dimension reserved
+for growth (one value, `FIELD_ACCESS`, since every kind today bounds the
+same kind of analysis), and `detail` is human-readable text for a reader
+who has not memorized the enum. A raw count invites exactly the false
+precision `Confidence`'s own ordinal design was built to refuse, one
+level up: "3 unresolved" reads as "probably fine," a claim this module is
+not entitled to make whether the true number is 3 or 3,000. Grouping and
+filtering happens on `kind`, never on a magnitude.
+
+`LimitationKind`/`LimitationScope`/`Limitation` live in `ports/adapters.py`,
+not `core/enums.py`, despite being a small closed vocabulary exactly like
+`Confidence`/`RelationshipType` — deliberately: they describe a boundary
+of *Hashira's own analysis*, not a fact about the system being analyzed,
+so they never touch the versioned IR contract (`core/schema.py::IR_MODELS`)
+and this whole milestone needed no `IR_VERSION` bump at all, on either
+pass — `Entity.metadata` and `Snapshot.diagnostics` were already the right
+open extensibility points.
+
+**Structural vs. conditional limitations, now distinguished explicitly.**
+v0.2's `AdapterCapabilities.known_limitations` blended two different
+claims: "raw SQL is always invisible" (true regardless of which entity is
+asked about) and "instance types are only tracked through certain forms"
+(true only for entities actually reached through an unsupported form).
+v0.3 splits them: `known_limitations` now declares only *structural* gaps
+(`RAW_SQL`) unconditionally; *conditional* gaps
+(`UNTYPED_PARAMETER`/`RETURN_VALUE_PROVENANCE`) are reported per-entity,
+from that entity's own `metadata["coverage_limitation_kinds"]`
+(`application/indexing.py`, populated from adapter-reported
+`sqlalchemy.unresolved_field_access` observations, each now tagged with
+*which* provenance form fell short). Declaring a conditional gap
+unconditionally would have been exactly the "blanket pessimism" this
+milestone's whole point was to avoid — the same overcorrection in the
+opposite direction from v0.1's silence.
+
+**Typed object provenance, widened by a second form: return values.**
+`adapters/sqlalchemy/adapter.py::_return_value_instances` resolves
+`payment = repo.get(...)` when `repo`'s own type is already known (via
+local instantiation or a typed parameter) and `repo.get`'s method
+definition — looked up cross-module, wherever it actually lives — carries
+an explicit `-> Payment` return annotation. Deliberately one-hop: a
+return value that is itself the result of another return value, or a
+call through `self.method()` (a bare `self` does not resolve through
+`resolve_expr`'s existing `SELF` handling, which only covers `self.attr`),
+are *not* attempted — each is a further, explicitly unsupported form,
+named in the adapter's own module docstring rather than silently
+guessed past. When the callee's own type is unknown at all (an external
+SDK's client, say), nothing is claimed either way — resolved or
+unresolved — since that is a different, deeper gap than "we know who was
+called and couldn't tell what it returns." Proven against the real,
+load-bearing `fastapi_checkout` fixture (`PaymentRepository`/
+`PaymentService.close`, new) exactly the same way the parameter form was
+proven in the prior pass.
+
+**Three further categories, found and logged, deliberately not built
+here:**
+
+1. **Framework/runtime reflection** — `PaymentOut.status` (Pydantic's
+   `orm_mode`) reads `payments.status` with no source-level attribute
+   access anywhere for a Python-level analyzer to see. This is not a
+   provenance-tracking gap at all; it needs a framework adapter producing
+   explicit evidence for "this schema field serializes this ORM
+   attribute," analogous to how `adapters/fastapi` already produces
+   `EXPOSES` evidence for a route — not another case bolted onto
+   `adapters/sqlalchemy`'s AST walker.
+2. **Dynamic dispatch** — `getattr(obj, method_name)(...)` (already
+   present in the agent-experiment fixture's `OrderService.complete`) is a
+   call-resolution gap, not a field-access provenance gap; it has no
+   `LimitationKind` yet because nothing adapter-side reports one.
+3. **Chained/deeper provenance** — `self.method()` return values, and a
+   return value whose own source is another return value — named above,
+   real, and deliberately still open.
+
+Each is logged so the next widening picks the right abstraction on
+purpose, rather than the current `AST → variable → field` shape being
+stretched to cover something structurally different from what it was
+built for.

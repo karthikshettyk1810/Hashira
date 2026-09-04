@@ -166,12 +166,14 @@ def build_server(
         answer this.
 
         Always check `coverage` before treating `paths` as exhaustive.
-        `coverage.status` is "PARTIAL" whenever `coverage.unresolved_access_count`
-        is nonzero or `coverage.limitations` is non-empty -- a short or even
-        empty `paths` list under PARTIAL coverage means "this is what was
-        found," not "this is everything that exists." `coverage.limitations`
-        names concrete blind spots (e.g. raw SQL, an unsupported way of
-        typing a variable) that this call cannot see at all."""
+        `coverage.status` is "PARTIAL" whenever `coverage.limitations` is
+        non-empty -- a short or even empty `paths` list under PARTIAL
+        coverage means "this is what was found," not "this is everything
+        that exists." Each entry in `coverage.limitations` is a typed
+        category (`kind`, `scope`, `detail`), e.g. raw SQL not being
+        analyzed, or a variable's type not being resolvable through a
+        supported form -- read `kind` to know *what class* of edge might
+        be missing, not just that something might be."""
         try:
             types = _parse_relationship_types(edge_types)
         except ValueError as exc:

@@ -185,7 +185,10 @@ def test_agent_discovers_impact_and_lineage_through_the_wire_protocol(
     # never read as "nothing else exists" without coverage saying so.
     coverage = impact_payload["coverage"]
     assert coverage["status"] == "PARTIAL"
-    assert any("raw sql" in limitation.lower() for limitation in coverage["limitations"])
+    assert any(
+        limitation["kind"] == "RAW_SQL" and "raw sql" in limitation["detail"].lower()
+        for limitation in coverage["limitations"]
+    )
 
     # get_entity confirms the same id independently, with full context.
     entity_payload = asyncio.run(_call(server, "get_entity", {"entity_id": status_id}))

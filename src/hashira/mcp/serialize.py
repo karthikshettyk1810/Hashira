@@ -77,7 +77,10 @@ def serialize_impact_result(result: ImpactResult) -> dict[str, Any]:
     else exists" when it might really mean "known analytical limitations
     apply" -- `application/impact.py`'s "coverage is not confidence" is a
     product decision, not just an internal one; an agent reading this JSON
-    is exactly who needs to see the difference."""
+    is exactly who needs to see the difference. `limitations` is a list of
+    typed categories (`{"kind", "scope", "detail"}`), not a count or free
+    text -- useful whether one entity or ten thousand are affected by a
+    given kind; group/filter on `kind`, read `detail` for a human."""
     return {
         "direction": result.direction,
         "start": serialize_entity(result.start),
@@ -87,8 +90,14 @@ def serialize_impact_result(result: ImpactResult) -> dict[str, Any]:
         "affected_entity_ids": [e.id for e in result.affected_entities],
         "coverage": {
             "status": result.coverage.status.value,
-            "unresolved_access_count": result.coverage.unresolved_access_count,
-            "limitations": list(result.coverage.limitations),
+            "limitations": [
+                {
+                    "kind": limitation.kind.value,
+                    "scope": limitation.scope.value,
+                    "detail": limitation.detail,
+                }
+                for limitation in result.coverage.limitations
+            ],
         },
     }
 

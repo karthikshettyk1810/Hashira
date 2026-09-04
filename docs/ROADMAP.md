@@ -682,6 +682,82 @@ core rather than the adapter.
     coverage, to test whether `reverse_impact` becomes unwieldy at volume)
     -- deliberately deferred until coverage semantics existed to interpret
     that scenario's results honestly.
+- [x] **Impact Analysis v0.3: structured limitations + return-value
+      provenance** — driven by *re-running* the same agent experiment
+      twice more after v0.2 landed, not by planning ahead. First re-run: a
+      real bug, not a research finding — `coverage` was correct on the
+      wire but the `reverse_impact`/`forward_impact` MCP tool
+      *descriptions* never told an agent it existed, so the re-run agent
+      never looked, even reading the exact JSON that carried it. Fixed by
+      editing the tool descriptions alone (`mcp/server.py`) — a one-line
+      lesson worth keeping: correct data on the wire is necessary, not
+      sufficient; an agent cannot act on a field it was never told to
+      check. Second re-run, confound removed: the agent used `PARTIAL`
+      exactly as intended — read `limitations`, deliberately investigated
+      the surfaces named, and found a *third*, unnamed gap (`getattr`
+      dynamic dispatch) on its own, because `PARTIAL` alone had taught it
+      not to trust a short result. Its own wishlist asked, unprompted, for
+      limitations "categorized by kind" — the actual driver of this
+      milestone, not a plan made in advance of the evidence.
+  - **A limitation describes a capability boundary, not an individual
+    missed edge.** `ImpactCoverage.limitations` is now `tuple[Limitation, ...]`
+    (`ports/adapters.py`: `Limitation{kind: LimitationKind, scope:
+    LimitationScope, detail: str}`), replacing v0.2's flat
+    `unresolved_access_count: int` entirely. A count invites the exact
+    false precision `Confidence`'s ordinal design was built to refuse, one
+    level up ("3 unresolved" reads as "probably fine" regardless of
+    whether the true number is 3 or 3,000) — grouping and filtering now
+    happens on `kind`, a closed, small vocabulary (`RAW_SQL`,
+    `UNTYPED_PARAMETER`, `RETURN_VALUE_PROVENANCE` today), never on a
+    magnitude. `docs/IR.md`'s "coverage is not confidence" entry has the
+    full reasoning, including why `LimitationKind` lives in `ports/adapters.py`
+    rather than `core/enums.py` despite being exactly the kind of small
+    closed vocabulary that module is for: it describes a boundary of
+    *Hashira's own analysis*, not a fact about the analyzed system, so it
+    never touches the versioned IR contract — this milestone needed zero
+    `IR_VERSION` bumps, on either pass, for the same reason v0.2 didn't.
+  - **Structural vs. conditional limitations, now split.** v0.2's
+    `AdapterCapabilities.known_limitations` blended "always true"
+    (raw SQL) with "true only for entities actually affected" (instance-
+    type tracking gaps) into one blanket list attached to every query.
+    v0.3 keeps `known_limitations` for structural gaps only; conditional
+    gaps are reported per-entity, from that entity's own
+    `metadata["coverage_limitation_kinds"]` (`application/indexing.py`,
+    populated from `sqlalchemy.unresolved_field_access` observations each
+    now tagged with *which* provenance form fell short) — declaring a
+    conditional gap unconditionally would have been the same "blanket
+    pessimism" overcorrection this milestone exists to avoid, in the
+    opposite direction from v0.1's silence.
+  - **Typed object provenance, widened by a second form: return values.**
+    `adapters/sqlalchemy/adapter.py::_return_value_instances` resolves
+    `payment = repo.get(...)` when `repo`'s own type is already known
+    (local instantiation or a typed parameter -- both needed broadening
+    from model-only to *any* known class, so a non-model service/repository
+    object is trackable too) and `repo.get`'s own method definition,
+    looked up cross-module wherever it actually lives, carries an explicit
+    `-> Payment` return annotation. Deliberately one-hop: a return value
+    that is itself another return value, or a call through `self.method()`
+    (`resolve_expr`'s existing `SELF` handling only covers `self.attr`,
+    not a bare `self`), are explicitly *not* attempted -- named as
+    remaining gaps, not guessed past. When the callee's own type is
+    unknown at all (an external SDK's client), nothing is claimed either
+    way, matching the same false-positive discipline the parameter form
+    already established. Proven against the real `fastapi_checkout`
+    fixture (`PaymentRepository`/`PaymentService.close`, new), the same
+    way the typed-parameter form was proven in the prior pass.
+  - **Three further categories, found and deliberately not built**:
+    framework/runtime reflection (Pydantic `orm_mode` reading an ORM
+    attribute with no source-level access to see at all -- needs a
+    framework adapter producing explicit serialization evidence, not
+    another AST case bolted onto the SQLAlchemy adapter), dynamic dispatch
+    (`getattr(obj, name)(...)` -- a call-resolution gap, not a
+    field-access provenance gap), and chained/`self.method()` return-value
+    provenance. Each is logged in `docs/IR.md` so the next widening picks
+    the right abstraction on purpose.
+  - **Not attempted in this pass**: any of the three categories above, and
+    the second agent-experiment scenario (full-coverage stress test) --
+    still deferred, now behind two additional, unplanned iterations rather
+    than one.
 
 ## Phase 4 — Agent integration
 

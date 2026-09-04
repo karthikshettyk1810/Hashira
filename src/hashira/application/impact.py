@@ -62,7 +62,7 @@ convenience over the module-level functions below (matching the shape a
 caller actually wants: `analyzer.reverse_impact(entity_id=...)`), not a
 second implementation of them.
 
-## Coverage is not confidence (Impact Analysis v0.2)
+## Coverage is not confidence (Impact Analysis v0.2/v0.3)
 
 A correct traversal is not automatically a complete answer. `reverse_impact`
 returning two paths for `Payment.status` is a true statement about the
@@ -83,19 +83,29 @@ Three states, not two, describe any one candidate access site:
   own, unmodified `Confidence`.
 * **NOT_OBSERVABLE** — the surface is structurally invisible to every
   configured adapter (raw SQL, an unindexed external SDK, a dynamically
-  computed attribute name) — reported as a plain-language entry in
-  `ImpactCoverage.limitations`, sourced from `AdapterCapabilities.
-  known_limitations` (`ports/adapters.py`), never silently absent.
+  computed attribute name) — reported as a `Limitation` (`ports/adapters.py`)
+  in `ImpactCoverage.limitations`, sourced from `AdapterCapabilities.
+  known_limitations`, never silently absent.
 * **recognized-but-unresolved** — an adapter saw *something* plausibly
   relevant (an attribute name matching a real column) but could not
   determine the accessing object's type through any provenance form it
-  supports — counted in `ImpactCoverage.unresolved_access_count`. This is
-  v0.2's honest, narrower stand-in for the ideal "examined and confirmed
-  absent" (`NOT_FOUND_AFTER_COVERAGE`) state described in `docs/IR.md`: it
-  is not a rigorous exhaustive-search proof, only a real, adapter-reported
-  count of accesses recognized as ambiguous rather than absent — see that
-  doc's entry for the full three-state framework this is a first, partial
+  supports — also a `Limitation` in `ImpactCoverage.limitations`, one per
+  distinct *kind* of gap triggered for this entity (`UNTYPED_PARAMETER`,
+  `RETURN_VALUE_PROVENANCE`, ...), never a raw count. This is the honest,
+  narrower stand-in for the ideal "examined and confirmed absent"
+  (`NOT_FOUND_AFTER_COVERAGE`) state described in `docs/IR.md`: not a
+  rigorous exhaustive-search proof, only real, adapter-reported categories
+  of access recognized as ambiguous rather than absent — see that doc's
+  entry for the full three-state framework this is a first, partial
   implementation of.
+
+**A limitation describes a capability boundary, not an individual missed
+edge** (v0.3, replacing v0.2's flat `unresolved_access_count`). A category
+like `RETURN_VALUE_PROVENANCE` stays exactly as useful whether it applies
+to one access or ten thousand — a count invites the same false-precision
+reading `Confidence`'s own ordinal design refuses (see below), just one
+level up: "3 unresolved" reads as "probably fine," which is not a claim
+this module is entitled to make.
 
 **Two invariants this module (and every caller) must keep**, per
 `docs/IR.md`:
@@ -121,6 +131,7 @@ from ..core.enums import Confidence, RelationshipType
 from ..core.evidence import Evidence
 from ..core.ids import SystemID
 from ..core.relationships import IMPACT_EDGES, Relationship
+from ..ports.adapters import Limitation, LimitationKind, LimitationScope
 from ..ports.repositories import UnitOfWork
 from .history import HistoricalGraph, query_at_revision
 
@@ -204,14 +215,13 @@ class ImpactResult:
 
 
 class CoverageStatus(StrEnum):
-    """`COMPLETE`: nothing in this run's evidence points at an
-    unresolved or structurally-invisible surface relevant to this query.
-    `PARTIAL`: at least one does -- see `ImpactCoverage.unresolved_access_count`/
-    `.limitations` for which. `PARTIAL` is the expected, honest answer for
-    almost any real system today (raw SQL blindness alone guarantees it
-    whenever a SQLAlchemy-backed system is involved) -- it is not an alarm,
-    it is the truth this module now refuses to hide (module docstring's
-    "coverage is not confidence")."""
+    """`COMPLETE`: `limitations` is empty -- nothing in this run's evidence
+    points at an unresolved or structurally-invisible surface relevant to
+    this query. `PARTIAL`: at least one `Limitation` applies. `PARTIAL` is
+    the expected, honest answer for almost any real system today (raw SQL
+    blindness alone guarantees it whenever a SQLAlchemy-backed system is
+    involved) -- it is not an alarm, it is the truth this module refuses
+    to hide (module docstring's "coverage is not confidence")."""
 
     COMPLETE = "COMPLETE"
     PARTIAL = "PARTIAL"
@@ -221,26 +231,30 @@ class CoverageStatus(StrEnum):
 class ImpactCoverage:
     """What this analysis actually examined, distinct from what it found.
 
-    `unresolved_access_count` is `start`'s own
-    `metadata["unresolved_access_count"]` (set at indexing time by
-    `application.indexing` from adapter-reported `*.unresolved_field_access`
-    observations -- see `adapters/sqlalchemy/adapter.py`'s module docstring)
-    -- a real, adapter-reported count of accesses recognized as *plausibly*
-    relevant but not resolvable through any supported provenance form, not
-    a promise that every such access in the system was found.
+    `limitations` combines two sources, undifferentiated -- a caller
+    should not need to know which produced which:
 
-    `limitations` is the deduplicated `known_limitations` of every adapter
-    configured for this system's indexing pipeline (`AdapterCapabilities`,
-    `ports/adapters.py`), read off the latest complete `Snapshot`'s
-    `diagnostics` (`application.indexing` writes them there, prefixed, at
-    index time). Deliberately pipeline-wide, not scoped to this specific
-    query's entities -- v0.2's simplification; see `docs/IR.md`'s entry on
-    this milestone for why over-warning was chosen over the complexity of
-    per-query adapter attribution."""
+    - *Conditional* limitations, specific to `start`: read off `start`'s
+      own `metadata["coverage_limitation_kinds"]` (set at indexing time by
+      `application.indexing` from adapter-reported
+      `*.unresolved_field_access` observations -- see
+      `adapters/sqlalchemy/adapter.py`'s module docstring), each a real,
+      adapter-reported *category* of access recognized as plausibly
+      relevant to this entity but not resolvable through any supported
+      provenance form. Never a promise that every such access was found --
+      see `ImpactResult`'s own "coverage is not confidence" note.
+    - *Structural* limitations, true regardless of entity: the
+      deduplicated `known_limitations` of every adapter configured for
+      this system's indexing pipeline (`AdapterCapabilities`,
+      `ports/adapters.py`), read off the latest complete `Snapshot`'s
+      `diagnostics` (`application.indexing` writes them there, JSON-encoded,
+      at index time). Deliberately pipeline-wide, not scoped to this
+      specific query's entities -- a simplification; see `docs/IR.md`'s
+      entry on this milestone for why over-warning was chosen over the
+      complexity of per-query adapter attribution."""
 
     status: CoverageStatus
-    unresolved_access_count: int
-    limitations: tuple[str, ...]
+    limitations: tuple[Limitation, ...]
 
 
 def resolve_identity(graph: HistoricalGraph, entity_id: str) -> Entity | None:
@@ -546,24 +560,55 @@ def _impact(
 
 _LIMITATION_PREFIX = "limitation: "
 
+#: Detail text for each *conditional* `LimitationKind` -- the ones an
+#: entity's own metadata names only by kind (`application.indexing`
+#: stores a set of kind strings, not full `Limitation` objects, since the
+#: detail text is the same every time a given kind is triggered). The
+#: *structural* kinds (today, `RAW_SQL`) need no entry here: those come
+#: fully formed off the snapshot's `diagnostics`, written by whichever
+#: adapter declared them.
+_CONDITIONAL_LIMITATION_TEXT: dict[LimitationKind, tuple[LimitationScope, str]] = {
+    LimitationKind.UNTYPED_PARAMETER: (
+        LimitationScope.FIELD_ACCESS,
+        "This entity is accessed through at least one function parameter "
+        "whose type could not be determined -- some reads/writes may be "
+        "missing.",
+    ),
+    LimitationKind.RETURN_VALUE_PROVENANCE: (
+        LimitationScope.FIELD_ACCESS,
+        "This entity is accessed through at least one local variable "
+        "assigned from a function or method's return value, whose return "
+        "type could not be resolved -- some reads/writes may be missing.",
+    ),
+}
+
 
 def _coverage_for(uow: UnitOfWork, *, system_id: SystemID, start: Entity) -> ImpactCoverage:
-    """`unresolved_access_count` reads `start`'s own indexing-time metadata
-    (per-entity, precise); `limitations` reads the latest complete
-    snapshot's `diagnostics` (pipeline-wide, a v0.2 simplification -- see
-    `ImpactCoverage`'s own docstring)."""
-    unresolved_raw = start.metadata.get("unresolved_access_count", 0)
-    unresolved = unresolved_raw if isinstance(unresolved_raw, int) else 0
+    """Conditional limitations read `start`'s own indexing-time metadata
+    (per-entity, precise); structural limitations read the latest complete
+    snapshot's `diagnostics` (pipeline-wide -- see `ImpactCoverage`'s own
+    docstring). Combined into one flat tuple; a caller should not need to
+    know which source produced which."""
+    conditional_kinds = start.metadata.get("coverage_limitation_kinds", [])
+    conditional: list[Limitation] = []
+    for raw_kind in conditional_kinds if isinstance(conditional_kinds, list) else ():
+        if not isinstance(raw_kind, str):
+            continue
+        try:
+            kind = LimitationKind(raw_kind)
+        except ValueError:
+            continue
+        scope, detail = _CONDITIONAL_LIMITATION_TEXT[kind]
+        conditional.append(Limitation(kind=kind, scope=scope, detail=detail))
     snapshot = uow.snapshots.latest_complete(system_id)
-    limitations = tuple(
-        diagnostic.removeprefix(_LIMITATION_PREFIX)
+    structural = tuple(
+        Limitation.model_validate_json(diagnostic.removeprefix(_LIMITATION_PREFIX))
         for diagnostic in (snapshot.diagnostics if snapshot else ())
         if diagnostic.startswith(_LIMITATION_PREFIX)
     )
-    status = CoverageStatus.PARTIAL if (unresolved or limitations) else CoverageStatus.COMPLETE
-    return ImpactCoverage(
-        status=status, unresolved_access_count=unresolved, limitations=limitations
-    )
+    limitations = (*conditional, *structural)
+    status = CoverageStatus.PARTIAL if limitations else CoverageStatus.COMPLETE
+    return ImpactCoverage(status=status, limitations=limitations)
 
 
 @dataclass(frozen=True, slots=True)
