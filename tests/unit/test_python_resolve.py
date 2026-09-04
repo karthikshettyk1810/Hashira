@@ -132,6 +132,36 @@ def test_self_attribute_chain_deeper_than_one_level_is_unresolved() -> None:
     assert result.qualified_name is None
 
 
+def test_resolves_a_known_self_attribute_method_call() -> None:
+    """`self.<attr>.<method>()` resolves when `<attr>`'s type is already
+    known (populated from `__init__` by `extractor.py`'s
+    `_self_attribute_types`, mirrored here directly against `resolve_expr`)
+    -- the gap the real-repository pilot found (`self._notification_service
+    .send_notifications(...)`, docs/ROADMAP.md's Phase 2 entry)."""
+    ctx = ResolutionContext(
+        module_qualified_name="shop.checkout",
+        enclosing_class_qualified_name="shop.checkout.CheckoutView",
+        self_attribute_types={"_payments": "shop.payments.PaymentService"},
+    )
+    result = resolve_expr(_parse_expr("self._payments.process"), ctx)
+    assert result.resolution == "SELF_ATTRIBUTE"
+    assert result.qualified_name == "shop.payments.PaymentService.process"
+
+
+def test_unknown_self_attribute_chain_stays_unresolved() -> None:
+    """A same-shape chain through an attribute `__init__` never assigned a
+    known type for -- `self.foo.bar()` must never be guessed just because
+    *some other* attribute on this class resolved."""
+    ctx = ResolutionContext(
+        module_qualified_name="shop.checkout",
+        enclosing_class_qualified_name="shop.checkout.CheckoutView",
+        self_attribute_types={"_payments": "shop.payments.PaymentService"},
+    )
+    result = resolve_expr(_parse_expr("self._unrelated.charge"), ctx)
+    assert result.resolution == "UNRESOLVED"
+    assert result.qualified_name is None
+
+
 def test_resolves_a_local_instance_method_call() -> None:
     ctx = ResolutionContext(
         module_qualified_name="shop.checkout",

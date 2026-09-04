@@ -8,11 +8,39 @@ path actually names something real, across the whole indexing run.
 
 Spec §10 / this project's identity model both hinge on distinguishing a fact
 from a guess. This module produces guesses. `resolution` on every result says
-exactly how much to trust one: `SELF`/`LOCAL_INSTANCE`/`IMPORT`/`MODULE_LOCAL`
-are syntactic certainties *about what the code says*, not proof of what it
-does — `UNRESOLVED` is the honest default when even that runs out. Rule of
-thumb, matching the "uncertainty is data, not failure" principle this was
-built to satisfy: never invent a target. If in doubt, resolve to nothing.
+exactly how much to trust one: `SELF`/`SELF_ATTRIBUTE`/`LOCAL_INSTANCE`/
+`IMPORT`/`MODULE_LOCAL` are syntactic certainties *about what the code says*,
+not proof of what it does — `UNRESOLVED` is the honest default when even that
+runs out. Rule of thumb, matching the "uncertainty is data, not failure"
+principle this was built to satisfy: never invent a target. If in doubt,
+resolve to nothing.
+
+## `SELF_ATTRIBUTE`: constructor-composed dependencies, not arbitrary attribute flow
+
+A real-repository pilot (`docs/ROADMAP.md`'s "Real Repository Pilot v0.1,
+Phase 2" entry) found `self._notification_service.send_notifications(...)`
+-- `self._notification_service` assigned once in `__init__`, called from a
+different method entirely -- completely unresolved, silently, with no
+disclosed limitation describing the gap. `SELF` only ever handled a single
+attribute hop (`self.method()`); `LOCAL_INSTANCE` only ever tracked a name
+assigned *within the same function body*. Neither covers the single most
+common way Python composes dependencies: assign a collaborator once in
+`__init__`, call methods on it from every other method.
+
+`SELF_ATTRIBUTE` closes exactly that gap, and only that gap.
+`ResolutionContext.self_attribute_types` is populated once per class, from
+`__init__` alone, by the same restricted mechanism `LOCAL_INSTANCE` already
+uses for a local variable: `self.<attr> = KnownCallable(...)` or
+`self.<attr>: T = KnownCallable(...)`, where `KnownCallable` itself resolves
+to `IMPORT` or `MODULE_LOCAL` -- never a guess layered on a guess. A
+same-file `self._mcube = mcube_client or MCubeClient()` fallback-default
+idiom (a `BoolOp`, not a bare `Call`) deliberately still resolves to
+nothing, exactly like an unrelated `self.foo.bar()` does -- widening this
+to arbitrary attribute-flow analysis (assignments outside `__init__`,
+non-`Call` right-hand sides, multi-hop attribute provenance) is future
+work, not attempted here, for the same reason `RETURN_VALUE_PROVENANCE`
+stayed a disclosed limitation rather than a guess when this project last
+faced this choice.
 """
 
 from __future__ import annotations
@@ -101,13 +129,15 @@ class ResolutionContext:
     module_locals: set[str] = field(default_factory=set)
     enclosing_class_qualified_name: str | None = None
     local_instance_types: dict[str, str] = field(default_factory=dict)
+    self_attribute_types: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedExpr:
     text: str
     resolution: str
-    """One of SELF, LOCAL_INSTANCE, IMPORT, MODULE_LOCAL, UNRESOLVED."""
+    """One of SELF, SELF_ATTRIBUTE, LOCAL_INSTANCE, IMPORT, MODULE_LOCAL,
+    UNRESOLVED."""
     qualified_name: str | None
 
 
@@ -142,12 +172,19 @@ def resolve_expr(expr: ast.expr, ctx: ResolutionContext) -> ResolvedExpr:
             resolution="LOCAL_INSTANCE",
             qualified_name=_qualify(ctx.local_instance_types[leftmost]),
         )
-    if leftmost in ("self", "cls") and ctx.enclosing_class_qualified_name and len(suffix) == 1:
-        return ResolvedExpr(
-            text=text,
-            resolution="SELF",
-            qualified_name=f"{ctx.enclosing_class_qualified_name}.{suffix[0]}",
-        )
+    if leftmost in ("self", "cls") and ctx.enclosing_class_qualified_name:
+        if len(suffix) == 1:
+            return ResolvedExpr(
+                text=text,
+                resolution="SELF",
+                qualified_name=f"{ctx.enclosing_class_qualified_name}.{suffix[0]}",
+            )
+        if len(suffix) >= 2 and suffix[0] in ctx.self_attribute_types:
+            return ResolvedExpr(
+                text=text,
+                resolution="SELF_ATTRIBUTE",
+                qualified_name=f"{ctx.self_attribute_types[suffix[0]]}.{'.'.join(suffix[1:])}",
+            )
     if leftmost in ctx.imports:
         return ResolvedExpr(
             text=text, resolution="IMPORT", qualified_name=_qualify(ctx.imports[leftmost])

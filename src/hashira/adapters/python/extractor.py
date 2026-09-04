@@ -165,6 +165,67 @@ def _local_instance_types(
     return types
 
 
+def _self_attribute_types(class_node: ast.ClassDef, ctx: ResolutionContext) -> dict[str, str]:
+    """`self.<attr> = KnownCallable(...)` / `self.<attr>: T = KnownCallable(...)`
+    assignments in the class's own `__init__`, resolved the same restricted
+    way `_local_instance_types` resolves a same-function local: only against
+    imports/module-locals, never against another guess. Scoped to `__init__`
+    alone, deliberately -- see `resolve.py`'s `SELF_ATTRIBUTE` docstring for
+    why this stays a bounded fix rather than general attribute-flow analysis.
+    """
+    init = next(
+        (
+            node
+            for node in class_node.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "__init__"
+        ),
+        None,
+    )
+    if init is None:
+        return {}
+
+    types: dict[str, str] = {}
+
+    def check(node: ast.AST) -> None:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Attribute)
+            and isinstance(node.targets[0].value, ast.Name)
+            and node.targets[0].value.id == "self"
+        ):
+            target, value = node.targets[0], node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Attribute)
+            and isinstance(node.target.value, ast.Name)
+            and node.target.value.id == "self"
+            and node.value is not None
+        ):
+            target, value = node.target, node.value
+        if target is not None and isinstance(value, ast.Call):
+            assert isinstance(target, ast.Attribute)
+            resolved = resolve_expr(value.func, ctx)
+            if resolved.qualified_name is not None and resolved.resolution in (
+                "IMPORT",
+                "MODULE_LOCAL",
+            ):
+                types[target.attr] = resolved.qualified_name
+
+    def walk(node: ast.AST) -> None:
+        check(node)
+        if isinstance(node, _SCOPE_NODES):
+            return
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+
+    for stmt in init.body:
+        walk(stmt)
+    return types
+
+
 class _Walker:
     def __init__(
         self,
@@ -322,6 +383,8 @@ class _Walker:
                 col=node.col_offset,
             )
         class_ctx = dataclasses.replace(ctx, enclosing_class_qualified_name=qualified_name)
+        self_types = _self_attribute_types(node, class_ctx)
+        class_ctx = dataclasses.replace(class_ctx, self_attribute_types=self_types)
         self._walk_body(
             node.body,
             ctx=class_ctx,

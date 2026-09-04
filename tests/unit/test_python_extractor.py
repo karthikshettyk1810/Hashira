@@ -204,6 +204,89 @@ class CheckoutService:
     assert calls["something_unknown.foo"]["resolved_qualified_name"] is None
 
 
+def test_constructor_assigned_self_attribute_resolves_from_another_method(
+    tmp_path: Path, system_id: str
+) -> None:
+    """The real-repository pilot's finding (docs/ROADMAP.md's Phase 2 entry):
+    `self._notification_service = NotificationService(...)` in `__init__`,
+    called as `self._notification_service.send_notifications(...)` from a
+    different method entirely, must resolve -- this is the single most
+    common way Python composes a class's own dependencies, and was silently
+    UNRESOLVED before `SELF_ATTRIBUTE` (resolve.py) existed."""
+    source = """
+from .notifications import NotificationService
+
+
+class IvrService:
+    def __init__(self, session):
+        self._notification_service = NotificationService(session=session)
+
+    def handle_webhook(self, payload):
+        return self._notification_service.send_notifications(payload)
+"""
+    result = _extract(tmp_path, "shop/ivr.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert calls["self._notification_service.send_notifications"]["resolution"] == (
+        "SELF_ATTRIBUTE"
+    )
+    assert (
+        calls["self._notification_service.send_notifications"]["resolved_qualified_name"]
+        == "shop.notifications.NotificationService.send_notifications"
+    )
+
+
+def test_constructor_assigned_self_attribute_with_annotation_resolves(
+    tmp_path: Path, system_id: str
+) -> None:
+    source = """
+from .payments import PaymentService
+
+
+class CheckoutView:
+    def __init__(self):
+        self._payments: PaymentService = PaymentService()
+
+    def checkout(self, order):
+        self._payments.process(order)
+"""
+    result = _extract(tmp_path, "shop/checkout.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert calls["self._payments.process"]["resolution"] == "SELF_ATTRIBUTE"
+    assert (
+        calls["self._payments.process"]["resolved_qualified_name"]
+        == "shop.payments.PaymentService.process"
+    )
+
+
+def test_unrelated_self_attribute_chain_stays_unresolved_even_with_a_known_sibling(
+    tmp_path: Path, system_id: str
+) -> None:
+    """A class with one resolvable `self.<attr>` must not cause an unrelated
+    `self.<other_attr>.method()` -- never assigned in `__init__` -- to be
+    guessed at just because the class has *a* known attribute."""
+    source = """
+from .payments import PaymentService
+
+
+class CheckoutView:
+    def __init__(self):
+        self._payments = PaymentService()
+
+    def checkout(self, order):
+        self._unrelated.charge(order)
+"""
+    result = _extract(tmp_path, "shop/checkout.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert calls["self._unrelated.charge"]["resolution"] == "UNRESOLVED"
+    assert calls["self._unrelated.charge"]["resolved_qualified_name"] is None
+
+
 def test_module_local_class_constructor_resolves_without_import(
     tmp_path: Path, system_id: str
 ) -> None:

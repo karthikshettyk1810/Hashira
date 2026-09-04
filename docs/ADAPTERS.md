@@ -129,10 +129,38 @@ enforced as a hard adapter rule, not a suggestion — see `resolve.py`'s and
 `normalizer.py`'s docstrings for the full reasoning).
 
 **Resolution kinds**, ranked by how much a single one is worth trusting
-(`resolve.py`): `SELF` (`self.foo`, one attribute level only) and
+(`resolve.py`): `SELF` (`self.foo`, one attribute level only),
+`SELF_ATTRIBUTE` (`self.foo.bar()` where `self.foo` was assigned a known
+type once in `__init__` — a real-repository pilot finding, see below), and
 `LOCAL_INSTANCE` (`x = Cls(); x.method()`, tracked per-function) are the
 strongest, followed by `IMPORT` and `MODULE_LOCAL`; anything not covered by
 these is `UNRESOLVED` and stays an observation forever, never promoted.
+
+**Fixed during Real Repository Pilot v0.1, Phase 2 — `self.<attr>.<method>()`
+calls through a constructor-composed dependency now resolve.** Before
+`SELF_ATTRIBUTE` existed, `self._notification_service = NotificationService
+(...)` in `__init__`, called as `self._notification_service.send_
+notifications(...)` from a different method, was silently `UNRESOLVED` —
+`SELF` only ever covered a single attribute hop, and `LOCAL_INSTANCE` only
+ever tracked a name assigned within the *same* function body. This is the
+single most common way Python composes a class's own dependencies, and a
+real agent task against a real, previously-unseen repository caught it: the
+agent's own `reverse_impact` on `send_notifications` missed the actual
+production caller entirely, and the agent only found it via plain grep,
+then had to independently diagnose the miss as a genuine Hashira gap rather
+than a real absence — see `docs/ROADMAP.md`'s Phase 2 entry for the full
+account, including why this crossed the bar for an immediate fix while
+Impact Presentation v0.1's `display_name` question and the analysis-root
+gap above did not (bounded, mechanical, and backed by a real task where it
+mattered, rather than a synthetic fixture or an ergonomic nice-to-have).
+`extractor.py`'s `_self_attribute_types` populates
+`ResolutionContext.self_attribute_types` once per class, from `__init__`
+alone, via the same restricted mechanism `LOCAL_INSTANCE` already uses —
+never a guess layered on a guess, and deliberately not generalized to
+attribute assignments outside `__init__` or right-hand sides other than a
+bare `Call` (e.g. `self._mcube = mcube_client or MCubeClient()`'s
+fallback-default idiom still resolves to nothing, same as an unrelated
+`self.foo.bar()` always has).
 
 **What this adapter can offer on its own, and where Git now picks up the
 rest** — found by the adversarial identity suite rather than assumed up

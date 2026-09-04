@@ -1062,6 +1062,79 @@ core rather than the adapter.
       (a real agent, on this same repository, doing real maintenance
       reasoning — not another indexing pass) has run.
 
+- [x] **Real Repository Pilot v0.1, Phase 2: a real maintenance task, not
+      another impact-of-X question** — two fresh agents, same real
+      repository, same real task ("convert `NotificationService`'s
+      always-send-both-channels design to an SMS-first fallback; find every
+      affected area, don't touch code yet"), one with only normal file
+      tools, one with those plus the Hashira MCP query CLI. Both reached the
+      same correct, complete affected-area list and independently converged
+      on the same core design question (what a never-attempted WhatsApp
+      channel should mean for `NotificationResult.whatsapp`/`all_succeeded`)
+      — a good sign the task itself was well-posed, not an artifact of one
+      agent's approach.
+  - **The consequential asymmetry wasn't in the final answer, it was in how
+      each agent got there.** `reverse_impact` on `send_notifications`
+      returned 8 paths, every one rooted in the test file — zero production
+      callers, including the actual one (`IvrService.handle_webhook`).
+      `coverage.status` was `PARTIAL`, but none of its three disclosed
+      limitations (`DYNAMIC_DISPATCH`, `FRAMEWORK_REFLECTION`, `RAW_SQL`)
+      describe this miss — the call in question,
+      `self._notification_service.send_notifications(...)`, is completely
+      static, not dynamic dispatch or reflection. The Hashira-assisted agent
+      caught the gap itself (it already knew the caller existed from its own
+      grep, got suspicious when `reverse_impact` didn't include it, and used
+      `get_relationships` to confirm the edge really was missing rather than
+      assume completeness) — good agent judgment, but it means Hashira, for
+      this task, was not a net win: baseline used ~10 searches/15 files/2
+      `git log` calls/0 scripts/83k tokens/277s and reached the answer via
+      grep alone; the Hashira-assisted run used 7 Hashira calls + ~9
+      searches/14 files/0 `git` calls/1 throwaway script (to page through
+      the ~2400-line raw JSON)/**112k tokens**/236s — more tokens, for a
+      graph that had to be independently audited rather than trusted. One
+      more honest data point: the agent never touched `summarize_impact` at
+      all — the real impact set here (8 paths) was too small to need it,
+      a reasonable, evidence-consistent choice, not a gap.
+  - **Root cause, traced to `resolve.py`**: `self._notification_service =
+      NotificationService(...)` in `IvrService.__init__`, called as
+      `self._notification_service.send_notifications(...)` from
+      `handle_webhook` — a different method. `SELF` only ever resolved a
+      single attribute hop (`self.method()`, `len(suffix) == 1`);
+      `LOCAL_INSTANCE` only ever tracked a name assigned *within the same
+      function body*. Neither covers assigning a collaborator once in
+      `__init__` and calling it from every other method — arguably the most
+      common dependency-composition idiom in Python — so the call fell
+      straight to `UNRESOLVED`, silently, with no disclosed limitation
+      naming this specific gap.
+  - **Fixed this pass, deliberately small** — unlike the analysis-root gap,
+      this one is bounded and mechanical, and now backed by real evidence of
+      real impact (a graph gap an agent had to independently catch and
+      audit around, on a task that mattered), which is exactly the bar this
+      project has held out for all along. `resolve.py` gains a fourth
+      resolution kind, `SELF_ATTRIBUTE`; `extractor.py`'s new
+      `_self_attribute_types` populates it once per class, from `__init__`
+      alone, via the exact same restricted mechanism `LOCAL_INSTANCE`
+      already uses for a same-function local (`self.<attr> = KnownCallable
+      (...)` / `self.<attr>: T = KnownCallable(...)`, resolved only against
+      `IMPORT`/`MODULE_LOCAL` — never a guess layered on a guess).
+      `docs/ADAPTERS.md`'s "Resolution kinds" entry has the full account.
+      8 new regression tests (`tests/unit/test_python_resolve.py`,
+      `tests/unit/test_python_extractor.py`) hold the four cases named for
+      this fix, plus the "don't guess a sibling attribute" negative case;
+      253 pre-existing tests still pass unchanged. The acceptance criterion
+      was not "the new fixture passes" — it was re-running the actual real
+      repository: re-indexed, `CALLS` went 301 → 314, and `reverse_impact`
+      on `send_notifications` now includes `IvrService.handle_webhook` with
+      a direct, `CERTAIN`-confidence `CALLS` edge.
+  - **Explicitly not attempted, on purpose, same reasoning as
+      `RETURN_VALUE_PROVENANCE`'s own restraint**: `self.<attr>` assignment
+      outside `__init__`; a right-hand side other than a bare `Call` (the
+      `self._mcube = mcube_client or MCubeClient()` fallback-default idiom,
+      genuinely common in this same real repository, still resolves to
+      nothing); multi-hop attribute provenance. Widening any of these is
+      bounded future work, not a blocker — the specific, evidence-backed gap
+      this pass exists to close is closed.
+
 ## Phase 5 — Runtime intelligence
 
 - [ ] CI integration, Sentry/observability integration.
