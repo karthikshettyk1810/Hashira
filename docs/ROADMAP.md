@@ -952,6 +952,62 @@ core rather than the adapter.
     *not* started here to keep this milestone's own definition of done
     free of client-specific variables.
 
+- [x] **Impact Presentation v0.1: a projection, not a second source of
+      truth** (`application/impact.py`'s `ImpactGroup`/`ImpactSummary`/
+      `summarize_impact`, `mcp/serialize.py`'s `serialize_impact_summary`,
+      `mcp/server.py`'s `summarize_impact` tool) — a fifth agent
+      experiment, run against a deliberately large fixture (36 files, a
+      "broad checkout" system) this time rather than the coverage-taxonomy
+      fixtures before it, put a *correct* `reverse_impact` result (35
+      paths, 35 entities, `coverage: PARTIAL`) in front of a real agent and
+      watched it build its own tooling anyway: a script to flatten 373KB of
+      per-hop-duplicated entity JSON, then a second, manual pass grouping
+      the flattened list by directory because the flat path list gave it
+      no structure to reason over. It named the fix itself, unprompted:
+      *"a named-cluster grouping would likely have both sped up my
+      synthesis and made the one real gap I found easier to spot sooner."*
+      `docs/IR.md`'s "Impact Presentation v0.1" entry has the full account.
+  - **Two rules, both held to a test, not just prose**: `ImpactResult`
+    itself does not change at all — `summarize_impact` computes a
+    projection *from* an already-produced result, never a new traversal,
+    never a new inference. And a summary never carries a full entity
+    record, only a bare `entity_id` + display name per group member —
+    `get_entity`/`get_relationships` are the drill-down. The invariant this
+    guarantees, `test_summarize_impact_never_invents_an_entity_id`
+    (`tests/unit/test_impact.py`), asserts the *set* of every id named
+    across a summary's groups equals, exactly, the canonical result's own
+    affected-entity-id set: nothing invented, nothing dropped.
+  - **Grouping is derived from existing IR structure, not a new
+    vocabulary.** `_group_key` groups by the directory an entity's own
+    `Entity.source.file` lives in — already-present data, zero `IR_VERSION`
+    bump. Run against the same fixture, this reproduces, exactly, the
+    clustering the agent built by hand (`app/routers`: 16, `app/services`:
+    8, `tests`: 8, `app/repositories`: 2, `app/workers`: 1) without
+    inventing an `API_LAYER`/`SERVICE_LAYER`/`PERSISTENCE_LAYER` vocabulary
+    that a differently-organized repository (commands/events/consumers/
+    projections) would not share. No importance ranking either — groups
+    order by `entity_count` descending only; deciding a service matters
+    more than a test is left to the agent, per the milestone's own explicit
+    instruction not to invent an importance score.
+  - **A new, separate MCP tool, not a mode flag** — `reverse_impact`/
+    `forward_impact` stay "the authoritative, detailed analysis";
+    `summarize_impact` is "an agent-oriented projection of that analysis,"
+    kept as a distinct tool so the distinction is visible at the protocol
+    level rather than buried in a parameter an agent might not read.
+    `coverage` crosses into the projection unchanged and stays first in
+    both the dataclass field order and the MCP serialization — a caller's
+    first read answers "how much should I trust this" before "what's in
+    it," matching `serialize_impact_result`'s own existing ordering.
+  - **Explicitly not attempted, per the milestone's own instruction**: no
+    relevance/importance ranking of groups or entities; no new inference
+    beyond what the underlying `reverse_impact`/`forward_impact` already
+    produced; no core IR vocabulary for "layers." A second, differently-
+    shaped stress fixture — to test whether directory-based grouping
+    generalizes past this one repository's own conventions, or merely
+    fits it — is deliberately deferred to a follow-up milestone, once this
+    projection has been re-validated against the same fixture that
+    surfaced the problem in the first place.
+
 ## Phase 5 — Runtime intelligence
 
 - [ ] CI integration, Sentry/observability integration.

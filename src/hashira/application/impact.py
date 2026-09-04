@@ -118,10 +118,53 @@ this module is entitled to make.
    `coverage.status` is `PARTIAL` — weakening per-edge confidence to stand
    in for incomplete analysis would quietly turn `Confidence` into the
    "junk drawer" it was explicitly designed never to become.
+
+## Impact Presentation v0.1: projection, not a second source of truth
+
+A stress-test agent experiment (`docs/IR.md`'s entry on this milestone) put
+a 35-path `reverse_impact` result in front of a real agent and watched it
+build its own tooling in response: a script to flatten 373KB of
+per-hop-duplicated entity envelopes into something readable, and a second,
+manual pass grouping the flattened list by directory because the flat
+path list gave it no structure to lean on. It said as much, unprompted:
+*"a named-cluster grouping would likely have both sped up my synthesis
+and made the one real gap I found easier to spot sooner."*
+
+`summarize_impact` (this module) and the `summarize_impact` MCP tool exist
+to do what that agent built by hand, so it doesn't have to. Two rules keep
+this from becoming a second, competing notion of truth:
+
+1. **`ImpactResult` does not change.** `reverse_impact`/`forward_impact`
+   stay exactly as lossless as before — every path, every hop, every full
+   entity, unmodified. `summarize_impact` is computed *from* an existing
+   `ImpactResult`, never a new traversal, and never invents a relationship
+   the traversal didn't already find. It can group, deduplicate, count,
+   and reference; it cannot infer.
+2. **Every entity a summary names is a bare id + qualified name, not a
+   full record.** A summary is for deciding *where to look next*, not for
+   reading in place — `get_entity`/`get_relationships` (already-proven MCP
+   tools) are the drill-down, so a summary never needs to carry
+   `identity_claims`/`metadata`/evidence just to be useful. The
+   invariant this guarantees, and that
+   `test_summarize_impact_never_invents_an_entity_id`
+   exists to hold permanently: every id a summary names is recoverable,
+   unchanged, from the canonical `ImpactResult` it was computed from.
+
+**Grouping is structural, not a layer taxonomy.** `_group_key` groups
+affected entities by the directory their own source file lives in
+(`Entity.source.file`'s parent) — already-present IR data, not a new
+`API_LAYER`/`SERVICE_LAYER` vocabulary invented because one stress
+fixture happened to cluster into routers/services/repositories/workers/
+tests. A codebase organized around commands/events/consumers/projections
+groups just as naturally, by its own directory structure, with zero
+change here. No importance ranking, either — `ImpactGroup` orders by
+`entity_count` descending and nothing else; deciding a service matters
+more than a test is the agent's call, not this module's to make for it.
 """
 
 from __future__ import annotations
 
+import posixpath
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -139,15 +182,18 @@ __all__ = [
     "CoverageStatus",
     "ImpactAnalyzer",
     "ImpactCoverage",
+    "ImpactGroup",
     "ImpactHop",
     "ImpactPath",
     "ImpactResult",
+    "ImpactSummary",
     "LineageHop",
     "LineageResult",
     "follow_lineage",
     "forward_impact",
     "resolve_identity",
     "reverse_impact",
+    "summarize_impact",
 ]
 
 #: Matches `application.indexing._ALL_ENTITIES_LIMIT`: fixture/demo scale.
@@ -255,6 +301,113 @@ class ImpactCoverage:
 
     status: CoverageStatus
     limitations: tuple[Limitation, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ImpactGroup:
+    """Every affected entity whose source file shares one directory --
+    see `summarize_impact`'s own docstring for why a directory, not an
+    invented layer name, is the grouping key. `entity_ids` is the
+    complete membership (for `get_entity`/`get_relationships` drill-down,
+    one call per id of interest, never all of them at once);
+    `representative_entity_id`/`_display_name` names one member (the
+    alphabetically first by `Entity.display_name` -- a deterministic
+    tie-break, not a claim that this member matters more than the
+    others)."""
+
+    key: str
+    """The directory this group's entities share, e.g. `"app/services"` --
+    `"(unknown)"` if an entity has no recorded source file, `"(root)"` if
+    the file has no parent directory."""
+    entity_count: int
+    path_count: int
+    representative_entity_id: str
+    representative_display_name: str
+    entity_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ImpactSummary:
+    """A projection of an `ImpactResult`, never a second source of truth
+    for it -- see the module docstring's "Impact Presentation v0.1" entry.
+    Every id named anywhere in `groups` is drawn unchanged from the
+    `ImpactResult` `summarize_impact` computed this from; nothing here is
+    inferred, only grouped, counted, and referenced.
+
+    `coverage` is carried through verbatim and deliberately placed ahead
+    of `groups` in this shape's own field order: a caller's first
+    question should be "how much should I trust this," not "what's in
+    it" -- see the module docstring for why that ordering is a product
+    decision, not an accident of dataclass field order."""
+
+    direction: str
+    start_id: str
+    revision: str | None
+    resolved_from: str | None
+    affected_entity_count: int
+    path_count: int
+    coverage: ImpactCoverage
+    groups: tuple[ImpactGroup, ...]
+    """Ordered by `entity_count` descending -- the only ordering this
+    module imposes. Not a relevance ranking: a group with one entity may
+    matter far more than one with ten; deciding that is the caller's job,
+    never this module's (module docstring: "let the agent decide what
+    matters")."""
+
+
+def _group_key(entity: Entity) -> str:
+    file = entity.source.file if entity.source else None
+    if not file:
+        return "(unknown)"
+    directory = posixpath.dirname(file)
+    return directory or "(root)"
+
+
+def summarize_impact(result: ImpactResult) -> ImpactSummary:
+    """Group `result.paths` by each path's endpoint's containing
+    directory (`_group_key`) -- a pure projection computed *from* an
+    already-produced `ImpactResult`, never a new traversal. Every
+    `ImpactPath` contributes to exactly one group, matching
+    `ImpactResult.affected_entities`'s own one-path-per-reached-entity
+    invariant, so `sum(g.entity_count for g in groups) ==
+    result.affected_entity_count` always holds --
+    `tests/unit/test_impact.py`'s own summary tests hold this as a
+    permanent invariant, alongside the stronger one from the module
+    docstring: every id `groups` names traces back to `result` unchanged.
+    """
+    entities_by_key: dict[str, list[Entity]] = defaultdict(list)
+    path_counts: dict[str, int] = defaultdict(int)
+    for path in result.paths:
+        key = _group_key(path.endpoint)
+        entities_by_key[key].append(path.endpoint)
+        path_counts[key] += 1
+
+    groups = []
+    for key, entities in entities_by_key.items():
+        ordered = sorted(entities, key=lambda e: e.display_name)
+        representative = ordered[0]
+        groups.append(
+            ImpactGroup(
+                key=key,
+                entity_count=len(ordered),
+                path_count=path_counts[key],
+                representative_entity_id=representative.id,
+                representative_display_name=representative.display_name,
+                entity_ids=tuple(e.id for e in ordered),
+            )
+        )
+    groups.sort(key=lambda g: g.entity_count, reverse=True)
+
+    return ImpactSummary(
+        direction=result.direction,
+        start_id=result.start.id,
+        revision=result.revision,
+        resolved_from=result.resolved_from,
+        affected_entity_count=len(result.affected_entities),
+        path_count=len(result.paths),
+        coverage=result.coverage,
+        groups=tuple(groups),
+    )
 
 
 def resolve_identity(graph: HistoricalGraph, entity_id: str) -> Entity | None:

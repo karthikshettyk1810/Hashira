@@ -15,6 +15,7 @@ from hashira.application.impact import (
     forward_impact,
     resolve_identity,
     reverse_impact,
+    summarize_impact,
 )
 from hashira.core import (
     Confidence,
@@ -30,6 +31,7 @@ from hashira.core import (
     RelationshipType,
     Snapshot,
     SnapshotStatus,
+    SourceLocation,
     SourceRef,
     System,
 )
@@ -699,3 +701,174 @@ def test_coverage_never_changes_a_hop_s_confidence(db: MemoryDatabase, system: S
 
     assert result.coverage.status is CoverageStatus.PARTIAL
     assert result.paths[0].hops[0].relationship.confidence is Confidence.CERTAIN
+
+
+# --- summarize_impact (Impact Presentation v0.1) -----------------------------
+
+
+def _entity_at(system: System, name: str, file: str) -> Entity:
+    return Entity(
+        system_id=system.id,
+        type=EntityType.SYMBOL,
+        name=name,
+        qualified_name=name,
+        source=SourceLocation(file=file),
+    )
+
+
+def test_summarize_impact_groups_by_containing_directory(
+    db: MemoryDatabase, system: System
+) -> None:
+    field = _entity(system, "field")
+    router_a = _entity_at(system, "router_a", "app/routers/payments.py")
+    router_b = _entity_at(system, "router_b", "app/routers/orders.py")
+    service = _entity_at(system, "service", "app/services/payment_service.py")
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [field, router_a, router_b, service],
+        [
+            _rel(system, router_a, field, RelationshipType.READS, evidence=ev),
+            _rel(system, router_b, field, RelationshipType.READS, evidence=ev),
+            _rel(system, service, field, RelationshipType.WRITES, evidence=ev),
+        ],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=field.id)
+    summary = summarize_impact(result)
+
+    assert summary.affected_entity_count == 3
+    assert summary.path_count == 3
+    by_key = {g.key: g for g in summary.groups}
+    assert by_key["app/routers"].entity_count == 2
+    assert set(by_key["app/routers"].entity_ids) == {router_a.id, router_b.id}
+    assert by_key["app/services"].entity_count == 1
+    assert by_key["app/services"].entity_ids == (service.id,)
+
+
+def test_summarize_impact_groups_are_ordered_by_entity_count_descending(
+    db: MemoryDatabase, system: System
+) -> None:
+    field = _entity(system, "field")
+    many = [_entity_at(system, f"r{i}", "app/routers/payments.py") for i in range(3)]
+    few = [_entity_at(system, "s0", "app/services/payment_service.py")]
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [field, *many, *few],
+        [_rel(system, e, field, RelationshipType.READS, evidence=ev) for e in (*many, *few)],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=field.id)
+    summary = summarize_impact(result)
+
+    assert [g.key for g in summary.groups] == ["app/routers", "app/services"]
+    assert [g.entity_count for g in summary.groups] == [3, 1]
+
+
+def test_summarize_impact_representative_is_alphabetically_first_by_display_name(
+    db: MemoryDatabase, system: System
+) -> None:
+    field = _entity(system, "field")
+    zeta = _entity_at(system, "zeta", "app/services/payment_service.py")
+    alpha = _entity_at(system, "alpha", "app/services/payment_service.py")
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [field, zeta, alpha],
+        [
+            _rel(system, zeta, field, RelationshipType.READS, evidence=ev),
+            _rel(system, alpha, field, RelationshipType.READS, evidence=ev),
+        ],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=field.id)
+    summary = summarize_impact(result)
+
+    group = summary.groups[0]
+    assert group.representative_entity_id == alpha.id
+    assert group.representative_display_name == "alpha"
+
+
+def test_summarize_impact_falls_back_to_unknown_for_entities_with_no_source_file(
+    db: MemoryDatabase, system: System
+) -> None:
+    field = _entity(system, "field")
+    caller = _entity(system, "caller")  # _entity sets no `source` at all
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [field, caller],
+        [_rel(system, caller, field, RelationshipType.READS, evidence=ev)],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=field.id)
+    summary = summarize_impact(result)
+
+    assert summary.groups[0].key == "(unknown)"
+
+
+def test_summarize_impact_carries_coverage_through_unchanged(
+    db: MemoryDatabase, system: System
+) -> None:
+    field = _entity(system, "field").model_copy(
+        update={"metadata": {"coverage_limitation_kinds": ["UNTYPED_PARAMETER"]}}
+    )
+    caller = _entity_at(system, "caller", "app/services/payment_service.py")
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [field, caller],
+        [_rel(system, caller, field, RelationshipType.READS, evidence=ev)],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=field.id)
+    summary = summarize_impact(result)
+
+    assert summary.coverage is result.coverage
+    assert summary.coverage.status is CoverageStatus.PARTIAL
+
+
+def test_summarize_impact_never_invents_an_entity_id(db: MemoryDatabase, system: System) -> None:
+    """The hard invariant: every id a summary names traces back, unchanged,
+    to the canonical `ImpactResult` it was computed from."""
+    field = _entity(system, "field")
+    entities = [_entity_at(system, f"e{i}", f"app/services/s{i % 3}.py") for i in range(7)]
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [field, *entities],
+        [_rel(system, e, field, RelationshipType.READS, evidence=ev) for e in entities],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=field.id)
+    summary = summarize_impact(result)
+
+    canonical_ids = {e.id for e in result.affected_entities}
+    summarized_ids: set[str] = set()
+    for group in summary.groups:
+        assert group.representative_entity_id in group.entity_ids
+        for entity_id in group.entity_ids:
+            assert entity_id in canonical_ids  # never invented
+            summarized_ids.add(entity_id)
+    assert summarized_ids == canonical_ids  # never dropped, never duplicated
+    assert sum(g.entity_count for g in summary.groups) == summary.affected_entity_count
+    assert sum(g.path_count for g in summary.groups) == summary.path_count

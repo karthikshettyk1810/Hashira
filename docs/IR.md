@@ -717,3 +717,103 @@ configured now sees all three structural gaps (`RAW_SQL`,
 gaps apply to that specific entity — an honest, if still incomplete,
 account of Hashira's current capability boundary, rather than a partial
 one that reads as more complete than it is.
+
+## Impact Presentation v0.1: a projection, not a second source of truth
+
+A fifth agent experiment, this time given a deliberately large fixture (a
+36-file "broad checkout" repository spanning routers, services,
+repositories, workers, and tests) and asked to run `reverse_impact` on
+`Payment.status` and report what it found, surfaced a problem no coverage
+work could fix, because it wasn't a coverage problem: the result was
+*correct* — 35 paths, 35 affected entities, `coverage.status: PARTIAL` with
+all three structural limitations disclosed — and still unusable as
+handed over. The agent's own report said so directly: it wrote a script to
+flatten 373KB of JSON (each of the 35 paths re-embedding every entity on
+its hops in full, `ImpactHop`'s lossless-by-design shape multiplying an
+already-modest entity count into hundreds of duplicated records), then did
+a second, manual pass grouping the flattened list by directory because the
+flat 35-path list gave it no structure to reason over. Unprompted, it named
+the fix: *"a named-cluster grouping would likely have both sped up my
+synthesis and made the one real gap I found easier to spot sooner."*
+
+**The tempting fix — collapse `ImpactResult` itself — is the wrong one.**
+Every hop's full entity, evidence, and confidence is exactly what makes a
+path *explainable* rather than a bare edge list (`Impact Analysis v0.1`,
+above); losing that to save bytes would trade away the one property this
+module exists to guarantee. What the agent actually needed wasn't a
+smaller `ImpactResult` — it was a second, deliberately lossy view *of* one,
+with an explicit contract for how much truth it's allowed to lose:
+
+1. **`ImpactResult` does not change, at all.** `reverse_impact`/
+   `forward_impact` stay exactly as lossless as they always were — the new
+   `summarize_impact` (`application/impact.py`) is computed *from* an
+   already-produced `ImpactResult`, never a new traversal, and never
+   invents a relationship the traversal didn't already find. It groups,
+   deduplicates, counts, and references; it does not infer.
+2. **Every entity a summary names is a bare id + display name, not a
+   record.** `ImpactGroup.entity_ids` is a tuple of ids; nothing in
+   `ImpactSummary` carries `identity_claims`, `metadata`, or evidence —
+   `get_entity`/`get_relationships` (already-proven MCP tools) are the
+   drill-down, so a summary never needs to duplicate what they already
+   answer well. This is the same shape the user's own sketch converged on,
+   pushed one step further: not "deduplicate entities into a lookup table
+   inside the response," but "don't put entities in the response at all —
+   return ids and let the existing drill-down tools resolve them."
+
+A hard invariant holds both rules to actual code, not just prose:
+`test_summarize_impact_never_invents_an_entity_id`
+(`tests/unit/test_impact.py`) asserts that the *set* of every `entity_id`
+named across every group in a summary equals, exactly, the set of ids in
+the `ImpactResult` it was computed from — no more (nothing invented), no
+less (nothing dropped). This is what "projection, not a second source of
+truth" means operationally: every object a summary references must be
+recoverable from the canonical result, unchanged.
+
+**Grouping is presentation, derived from existing structure — not a new
+vocabulary.** `_group_key` groups each path's endpoint by the directory its
+own `Entity.source.file` lives in (`posixpath.dirname`, already-present IR
+data — no new field, no `IR_VERSION` bump). Run against the same broad
+fixture, this reproduces, exactly, the clustering the agent built by hand:
+`app/routers` (16), `app/services` (8), `tests` (8), `app/repositories` (2),
+`app/workers` (1). The temptation this milestone deliberately refused was
+promoting that clustering into a core vocabulary —
+`API_LAYER`/`SERVICE_LAYER`/`PERSISTENCE_LAYER` as new `EntityType` or
+metadata concepts. A repository organized around commands, events,
+consumers, and projections would cluster just as naturally by its own
+directory structure, with zero change to this module; baking in
+"layers" would have been fitting one fixture's conventions into the graph
+itself, exactly the mistake `LimitationScope`'s renaming (above) already
+warned against for a different reason. Groups are also ordered by
+`entity_count` descending and nothing else — no importance score, no
+`service > router > test` ranking. Whether a one-entity group matters more
+than a ten-entity one is the agent's call; this module's only job is to
+make the structure visible, not to rank it.
+
+**Exposed as a new, separate MCP tool (`summarize_impact`), not a mode
+flag on `reverse_impact`/`forward_impact`.** `reverse_impact`/
+`forward_impact` remain "the authoritative, detailed analysis";
+`summarize_impact` is "an agent-oriented projection of that analysis" —
+keeping them distinct tools makes the distinction visible at the protocol
+level (`mcp/server.py`'s own docstring), not something a caller has to
+notice in a parameter. The intended chain: `reverse_impact` establishes
+scale ("35 entities, 35 paths, coverage: PARTIAL"), `summarize_impact`
+turns that into navigable structure ("app/routers: 16, app/services: 8,
+tests: 8, ..."), then `get_entity`/`get_relationships` supply full evidence
+for whichever group the agent decides is worth a closer look. `coverage`
+crosses into `ImpactSummary` unchanged and stays first in both the
+dataclass's field order and its MCP serialization
+(`serialize_impact_summary`) — the same "how much should I trust this
+before what's in it" ordering `serialize_impact_result` already uses for
+`ImpactResult`, so a caller's first read of either shape answers the
+trust question before the content question.
+
+**Explicitly not attempted, on purpose:** no importance/relevance ranking
+of groups or entities (the module docstring's own words: "let the agent
+decide what matters"); no new inference beyond what `reverse_impact`/
+`forward_impact` already produced; no core IR vocabulary for "layers" or
+similar structural roles. Whether directory-based grouping generalizes
+past this one fixture's own conventions is deliberately left for a second,
+differently-shaped stress fixture — not attempted in this milestone, since
+this one fixture had already isolated the duplication and structure
+problems precisely enough to act on without risking a premature
+generalization from a single data point.

@@ -1,5 +1,5 @@
 """`mcp.server.build_server`: real MCP protocol calls (via `InMemoryTransport`,
-no subprocess) against each of the seven tools -- confirming both that a
+no subprocess) against each of the eight tools -- confirming both that a
 tool's structured result matches its underlying `application/` call and that
 Hashira's epistemic detail (confidence, evidence, knowledge_class) survives
 the protocol round trip, per the milestone's own non-negotiable requirement.
@@ -28,6 +28,7 @@ from hashira.core import (
     Origin,
     Relationship,
     RelationshipType,
+    SourceLocation,
     SourceRef,
     System,
 )
@@ -38,6 +39,16 @@ from hashira.storage.memory import MemoryDatabase
 
 def _entity(system: System, name: str) -> Entity:
     return Entity(system_id=system.id, type=EntityType.SYMBOL, name=name, qualified_name=name)
+
+
+def _entity_at(system: System, name: str, file: str) -> Entity:
+    return Entity(
+        system_id=system.id,
+        type=EntityType.SYMBOL,
+        name=name,
+        qualified_name=name,
+        source=SourceLocation(file=file),
+    )
 
 
 def _evidence(system: System) -> Evidence:
@@ -101,7 +112,7 @@ def _run(coro: object) -> object:
     return asyncio.run(coro)  # type: ignore[arg-type]
 
 
-def test_list_tools_exposes_all_seven(server: MCPServer) -> None:
+def test_list_tools_exposes_all_eight(server: MCPServer) -> None:
     async def scenario() -> set[str]:
         async with _session(server) as session:
             result = await session.list_tools()
@@ -115,6 +126,7 @@ def test_list_tools_exposes_all_seven(server: MCPServer) -> None:
         "query_at_revision",
         "reverse_impact",
         "forward_impact",
+        "summarize_impact",
         "follow_lineage",
         "search_entities",
     }
@@ -248,6 +260,87 @@ def test_reverse_impact_unknown_entity_returns_error(server: MCPServer) -> None:
     async def scenario() -> dict[str, object]:
         async with _session(server) as session:
             result = await session.call_tool("reverse_impact", {"entity_id": "ent_nope"})
+            assert result.structured_content is not None
+            return result.structured_content
+
+    payload = _run(scenario())
+
+    assert "error" in payload
+
+
+def test_summarize_impact_groups_and_traces_back_to_reverse_impact(
+    db: MemoryDatabase, system: System, server: MCPServer
+) -> None:
+    status = _entity(system, "Payment.status")
+    route = _entity_at(system, "capture_payment", "app/routers/payments.py")
+    handler = _entity_at(system, "PaymentService.capture", "app/services/payment_service.py")
+    test_fn = _entity_at(system, "test_capture_sets_status", "tests/test_payment_service.py")
+    ev = _evidence(system)
+    with db.unit_of_work() as uow:
+        uow.graph.upsert_entities([status, route, handler, test_fn])
+        uow.graph.upsert_relationships(
+            [
+                _rel(system, route, status, RelationshipType.WRITES, ev),
+                _rel(system, handler, status, RelationshipType.WRITES, ev),
+                _rel(system, test_fn, status, RelationshipType.READS, ev),
+            ]
+        )
+        uow.evidence.record([ev])
+        uow.commit()
+
+    async def scenario() -> tuple[dict[str, object], dict[str, object]]:
+        async with _session(server) as session:
+            full_result = await session.call_tool("reverse_impact", {"entity_id": status.id})
+            assert full_result.structured_content is not None
+            summary_result = await session.call_tool("summarize_impact", {"entity_id": status.id})
+            assert summary_result.structured_content is not None
+            return full_result.structured_content, summary_result.structured_content
+
+    full_payload, summary_payload = _run(scenario())
+
+    assert summary_payload["direction"] == "reverse"
+    assert summary_payload["affected_entity_count"] == 3
+    assert summary_payload["path_count"] == 3
+    assert "coverage" in summary_payload
+    assert summary_payload["coverage"] == full_payload["coverage"]
+
+    groups = summary_payload["groups"]
+    keys = {g["key"] for g in groups}  # type: ignore[union-attr]
+    assert keys == {"app/routers", "app/services", "tests"}
+
+    summarized_ids = {
+        entity_id
+        for g in groups
+        for entity_id in g["entity_ids"]  # type: ignore[union-attr]
+    }
+    assert summarized_ids == set(full_payload["affected_entity_ids"])  # type: ignore[arg-type]
+
+
+def test_summarize_impact_unknown_entity_returns_error(server: MCPServer) -> None:
+    async def scenario() -> dict[str, object]:
+        async with _session(server) as session:
+            result = await session.call_tool("summarize_impact", {"entity_id": "ent_nope"})
+            assert result.structured_content is not None
+            return result.structured_content
+
+    payload = _run(scenario())
+
+    assert "error" in payload
+
+
+def test_summarize_impact_rejects_invalid_direction(
+    db: MemoryDatabase, system: System, server: MCPServer
+) -> None:
+    entity = _entity(system, "a")
+    with db.unit_of_work() as uow:
+        uow.graph.upsert_entities([entity])
+        uow.commit()
+
+    async def scenario() -> dict[str, object]:
+        async with _session(server) as session:
+            result = await session.call_tool(
+                "summarize_impact", {"entity_id": entity.id, "direction": "sideways"}
+            )
             assert result.structured_content is not None
             return result.structured_content
 

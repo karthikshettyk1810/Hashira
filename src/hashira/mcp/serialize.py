@@ -21,7 +21,15 @@ from __future__ import annotations
 from typing import Any
 
 from ..application.history import HistoricalGraph
-from ..application.impact import ImpactHop, ImpactPath, ImpactResult, LineageHop, LineageResult
+from ..application.impact import (
+    ImpactCoverage,
+    ImpactHop,
+    ImpactPath,
+    ImpactResult,
+    ImpactSummary,
+    LineageHop,
+    LineageResult,
+)
 from ..core.entities import Entity
 from ..core.evidence import Evidence
 from ..core.relationships import Relationship
@@ -31,6 +39,7 @@ __all__ = [
     "serialize_evidence",
     "serialize_historical_graph",
     "serialize_impact_result",
+    "serialize_impact_summary",
     "serialize_lineage_result",
     "serialize_relationship",
 ]
@@ -66,6 +75,20 @@ def _serialize_impact_path(path: ImpactPath) -> dict[str, Any]:
     }
 
 
+def _serialize_coverage(coverage: ImpactCoverage) -> dict[str, Any]:
+    return {
+        "status": coverage.status.value,
+        "limitations": [
+            {
+                "kind": limitation.kind.value,
+                "scope": limitation.scope.value,
+                "detail": limitation.detail,
+            }
+            for limitation in coverage.limitations
+        ],
+    }
+
+
 def serialize_impact_result(result: ImpactResult) -> dict[str, Any]:
     """Every path, every hop -- no path enumeration limit imposed here
     beyond what `application.impact` itself already applies (one shortest
@@ -80,7 +103,11 @@ def serialize_impact_result(result: ImpactResult) -> dict[str, Any]:
     is exactly who needs to see the difference. `limitations` is a list of
     typed categories (`{"kind", "scope", "detail"}`), not a count or free
     text -- useful whether one entity or ten thousand are affected by a
-    given kind; group/filter on `kind`, read `detail` for a human."""
+    given kind; group/filter on `kind`, read `detail` for a human.
+
+    Deliberately still lossless, byte cost and all -- `serialize_impact_summary`
+    (below) is the projection for a caller that wants a small, navigable
+    result instead; this stays the authoritative, detailed form."""
     return {
         "direction": result.direction,
         "start": serialize_entity(result.start),
@@ -88,17 +115,38 @@ def serialize_impact_result(result: ImpactResult) -> dict[str, Any]:
         "resolved_from": result.resolved_from,
         "paths": [_serialize_impact_path(p) for p in result.paths],
         "affected_entity_ids": [e.id for e in result.affected_entities],
-        "coverage": {
-            "status": result.coverage.status.value,
-            "limitations": [
-                {
-                    "kind": limitation.kind.value,
-                    "scope": limitation.scope.value,
-                    "detail": limitation.detail,
-                }
-                for limitation in result.coverage.limitations
-            ],
-        },
+        "coverage": _serialize_coverage(result.coverage),
+    }
+
+
+def serialize_impact_summary(summary: ImpactSummary) -> dict[str, Any]:
+    """`coverage` first, deliberately, matching `ImpactSummary`'s own
+    field order: a caller's first question should be "how much should I
+    trust this" before "what's in it" (`application/impact.py`'s "Impact
+    Presentation v0.1" entry). Every entity named in `groups` is a bare
+    `{"entity_id", "display_name"}` pair, never a full record -- `get_entity`/
+    `get_relationships` are the drill-down, not this response."""
+    return {
+        "direction": summary.direction,
+        "start_id": summary.start_id,
+        "revision": summary.revision,
+        "resolved_from": summary.resolved_from,
+        "coverage": _serialize_coverage(summary.coverage),
+        "affected_entity_count": summary.affected_entity_count,
+        "path_count": summary.path_count,
+        "groups": [
+            {
+                "key": group.key,
+                "entity_count": group.entity_count,
+                "path_count": group.path_count,
+                "representative": {
+                    "entity_id": group.representative_entity_id,
+                    "display_name": group.representative_display_name,
+                },
+                "entity_ids": list(group.entity_ids),
+            }
+            for group in summary.groups
+        ],
     }
 
 
