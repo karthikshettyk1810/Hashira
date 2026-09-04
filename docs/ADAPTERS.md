@@ -151,6 +151,46 @@ Without one, the old behavior stands exactly as before: `NEW` with no
 lineage, the old entity orphaned. Safe either way — nothing silently merges
 or vanishes.
 
+**Known limitation — analysis root vs. repository root.** `discovery.py`
+computes each file's dotted import name relative to the root it is given
+(`import_root_for`, "src/ layout aware") — but that root is always whatever
+path the caller of `IndexingService.index()` passed in, which the whole
+pipeline implicitly assumes is *both* the Git repository root (what
+`GitAdapter` walks) *and* the language's own import root. The first
+real-repository pilot (`docs/ROADMAP.md`'s "Real Repository Pilot v0.1"
+entry) found a real, unfixtured case where those two roots diverge: a
+monorepo with the Git root one level above a `backend/` directory holding
+the actual Python application (`frontend/` alongside it). Indexed at the
+Git root, every file still gets scanned and zero errors are reported — but
+`import_root_for` computes each module's dotted name with a spurious
+`backend.` prefix, so every cross-file reference (`from app.foo import
+Bar`) fails to resolve against it. The result: `WRITES`, `READS`,
+`CONTAINS`, `IMPORTS`, and most `CALLS` edges go silently missing, with
+nothing in `IndexingResult.errors` to say so. Indexed at the actual Python
+root (`backend/`) instead, the same repository resolves fully.
+
+This is a materially worse failure mode than a crash: `IndexingResult`
+reports success, entity/relationship *counts* look plausible, and nothing
+distinguishes "this system genuinely has few cross-file relationships"
+from "the configured root broke resolution." That is exactly the
+distinction `LimitationKind`/`CoverageStatus` (`application/impact.py`)
+exist to make explicit elsewhere in this project — this gap is the same
+shape, one layer earlier, at indexing time rather than query time.
+
+**Current workaround**: pass the language/application root directly to
+`IndexingService.index()`, not the Git repository root, whenever they
+differ. **Deliberately not fixed yet**: an "auto-detect the import root"
+heuristic was considered and rejected for this pass — real repositories
+diverge in too many shapes (`backend/src/myapp/`, multiple sibling
+service directories each with their own root, `apps/{api,worker,admin}/`,
+namespace packages) for a heuristic chosen from one pilot repository to
+generalize, which is exactly the mistake `Impact Presentation v0.1`
+(`docs/IR.md`) already refused to make for grouping. The right fix is to
+model analysis roots/import roots as an explicit concept the caller
+configures, and to have indexing itself surface a coverage-style warning
+when a nonzero file set resolves to zero cross-file relationships — future
+work, not attempted here.
+
 ## Git adapter
 
 `src/hashira/adapters/git/` — the `HistoryAdapter` port, satisfied. Reports

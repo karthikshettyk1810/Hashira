@@ -1007,6 +1007,60 @@ core rather than the adapter.
     fits it — is deliberately deferred to a follow-up milestone, once this
     projection has been re-validated against the same fixture that
     surfaced the problem in the first place.
+  - **Addendum — re-validated, then generalized.** Re-run against the
+    unmodified `checkout_broad` fixture: `summarize_impact` cut the payload
+    from 373KB to ~4KB and the agent neither rebuilt the grouping nor
+    called `reverse_impact` more than once, using it only to fetch evidence
+    it had already decided it needed. A second, deliberately different
+    fixture followed (`order_events` — commands/consumers/workers/
+    projections/API/an external gateway boundary, with one shared service
+    called from three unrelated entry points, specifically to see whether
+    directory-based grouping was fitting one repository or a real
+    structural signal): the same code produced a coherent 9-group summary
+    with no vocabulary change, correctly isolated the shared service as
+    its own single-entity group distinct from its three unrelated callers,
+    and cut a 254KB `reverse_impact` result to ~4.9KB. Across both, the
+    agent needed every individual member's name (not just a group's size
+    and representative) only when the task itself demanded naming every
+    affected symbol, and even then satisfied that need from the
+    `reverse_impact` payload it already had for evidence, never through
+    per-id `get_entity` calls — so the `entity_ids`-plus-one-representative
+    shape stays as designed; logged as a weighed-but-not-acted-on
+    hypothesis rather than a confirmed gap, deliberately, per the
+    milestone's own "don't put information into a projection merely
+    because it's available" principle.
+
+- [x] **Real Repository Pilot v0.1, Phase 1: index a repository Hashira has
+      never seen** — the first test of the whole system against a real
+      codebase (`oota.app`'s IVR backend: FastAPI + async SQLAlchemy 2.0 +
+      Alembic, ~350 files, 22 real commits, multi-channel SMS/WhatsApp
+      notification logic) rather than a fixture built to exercise a
+      specific adapter capability. Indexing itself passed cleanly: 0
+      crashes, 0 errors, 0 duplicate entities, 0 duplicate relationships,
+      ~3 seconds, resolving straight through SQLAlchemy 2.0's `Mapped[...]`/
+      `mapped_column(...)` style, Postgres-dialect `JSONB`/`UUID` columns,
+      and `from __future__ import annotations` deferred typing — none of
+      which any existing fixture had exercised.
+  - **The one real finding, and it's a good one**: the repository is a
+      monorepo (`backend/` and `frontend/` siblings under one Git root),
+      and indexing at the Git root instead of the actual Python root
+      silently dropped `WRITES`/`READS`/`CONTAINS`/`IMPORTS` entirely and
+      cut `CALLS` by two-thirds — with zero errors reported. `docs/
+      ADAPTERS.md`'s new "known limitation — analysis root vs. repository
+      root" entry has the full account. Deliberately **not fixed this
+      pass** — see that entry for why an auto-detection heuristic drawn
+      from one pilot repository was rejected for the same reason
+      Impact Presentation v0.1 refused to invent a layer vocabulary from
+      one fixture. Logged as a roadmap item, workaround applied (index the
+      actual Python root), and the resulting graph — 445 entities, 946
+      relationships across 9 types — is what Phase 2 uses.
+  - **Explicitly not attempted in this pass**: fixing the analysis-root
+      detection; a coverage-style warning when a nonzero file set resolves
+      to zero cross-file relationships (the concrete future direction
+      `ADAPTERS.md` names); a second real-repository pilot, deliberately
+      held back the same way a second stress fixture was, until Phase 2
+      (a real agent, on this same repository, doing real maintenance
+      reasoning — not another indexing pass) has run.
 
 ## Phase 5 — Runtime intelligence
 
