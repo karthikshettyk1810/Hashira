@@ -296,6 +296,107 @@ def test_no_sqlalchemy_shaped_code_produces_no_observations(tmp_path: Path, syst
     assert addition.errors == []
 
 
+# --- typed-parameter provenance (Impact Analysis v0.2's "coverage" widening) -
+
+
+def test_field_write_via_typed_parameter_is_detected(tmp_path: Path, system_id: str) -> None:
+    """`def process(self, payment: Payment)` -- a *second* provenance form,
+    alongside `payment = Payment()`; see the module docstring's "typed
+    object provenance" entry."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "from .models import Payment\n\n\n"
+        "class PaymentService:\n"
+        "    def mark_captured(self, payment: Payment) -> str:\n"
+        '        payment.status = "captured"\n'
+        "        return payment.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    accesses = _by_kind(addition, "sqlalchemy.field_access")
+    kinds = {a.payload["access_kind"] for a in accesses}
+    assert kinds == {"READ", "WRITE"}
+    assert all(a.payload["column_qualified_name"] == "payments.status" for a in accesses)
+    assert _by_kind(addition, "sqlalchemy.unresolved_field_access") == []
+
+
+def test_unresolved_access_reported_for_untyped_parameter_matching_a_known_column(
+    tmp_path: Path, system_id: str
+) -> None:
+    """An untyped parameter accessing `.status` -- a name that genuinely is
+    a column somewhere -- is recognized as plausibly relevant but not
+    resolved, and reported so, rather than silently dropped (see
+    `application/impact.py::ImpactCoverage`)."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/worker.py",
+        "def sync(payment):\n    return payment.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.field_access") == []
+    unresolved = _by_kind(addition, "sqlalchemy.unresolved_field_access")
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["attribute_name"] == "status"
+    assert unresolved[0].payload["accessor_qualified_name"] == "payments.worker.sync"
+
+
+def test_unresolved_access_not_reported_for_an_attribute_name_no_model_has(
+    tmp_path: Path, system_id: str
+) -> None:
+    """The precision guard: an untyped parameter's attribute access is only
+    flagged when the attribute name is a real column *somewhere* -- an
+    unrelated same-named attribute on some other, genuinely unrelated
+    object (e.g. a third-party SDK's response) must not be miscounted."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/gateway.py",
+        "def charge(result):\n    return result.reference_number\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.unresolved_field_access") == []
+
+
+def test_capabilities_state_known_limitations() -> None:
+    limitations = SQLAlchemyAdapter().capabilities().known_limitations
+    assert any("raw sql" in limitation.lower() for limitation in limitations)
+
+
 # --- declaration-rename detection (identity/declaration_evidence.py's raw material) --
 
 

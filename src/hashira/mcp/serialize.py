@@ -70,7 +70,14 @@ def serialize_impact_result(result: ImpactResult) -> dict[str, Any]:
     """Every path, every hop -- no path enumeration limit imposed here
     beyond what `application.impact` itself already applies (one shortest
     path per reached entity). No prose, no ranking, no collapsing to a flat
-    list of names."""
+    list of names.
+
+    `coverage` crosses the wire too, and for the same reason everything
+    else here does: a zero/short `paths` list must never read as "nothing
+    else exists" when it might really mean "known analytical limitations
+    apply" -- `application/impact.py`'s "coverage is not confidence" is a
+    product decision, not just an internal one; an agent reading this JSON
+    is exactly who needs to see the difference."""
     return {
         "direction": result.direction,
         "start": serialize_entity(result.start),
@@ -78,6 +85,11 @@ def serialize_impact_result(result: ImpactResult) -> dict[str, Any]:
         "resolved_from": result.resolved_from,
         "paths": [_serialize_impact_path(p) for p in result.paths],
         "affected_entity_ids": [e.id for e in result.affected_entities],
+        "coverage": {
+            "status": result.coverage.status.value,
+            "unresolved_access_count": result.coverage.unresolved_access_count,
+            "limitations": list(result.coverage.limitations),
+        },
     }
 
 

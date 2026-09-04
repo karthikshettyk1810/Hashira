@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from hashira.application.history import HistoricalGraph
 from hashira.application.impact import (
+    CoverageStatus,
+    ImpactCoverage,
     ImpactHop,
     ImpactPath,
     ImpactResult,
@@ -91,8 +93,18 @@ def test_serialize_impact_result_preserves_every_hop() -> None:
     hop1 = ImpactHop(relationship=_rel(a, b, ev), source=a, target=b, evidence=(ev,))
     hop2 = ImpactHop(relationship=_rel(b, c, ev), source=b, target=c, evidence=(ev,))
     path = ImpactPath(hops=(hop1, hop2), endpoint=c)
+    coverage = ImpactCoverage(
+        status=CoverageStatus.PARTIAL,
+        unresolved_access_count=2,
+        limitations=("raw SQL is not analyzed",),
+    )
     result = ImpactResult(
-        direction="forward", start=a, revision=None, resolved_from=None, paths=(path,)
+        direction="forward",
+        start=a,
+        revision=None,
+        paths=(path,),
+        coverage=coverage,
+        resolved_from=None,
     )
 
     dumped = serialize_impact_result(result)
@@ -105,6 +117,11 @@ def test_serialize_impact_result_preserves_every_hop() -> None:
     assert dumped["paths"][0]["hops"][0]["evidence"][0]["id"] == ev.id
     assert dumped["paths"][0]["endpoint"]["id"] == c.id
     assert dumped["affected_entity_ids"] == [c.id]
+    assert dumped["coverage"] == {
+        "status": "PARTIAL",
+        "unresolved_access_count": 2,
+        "limitations": ["raw SQL is not analyzed"],
+    }
 
 
 def test_serialize_lineage_result_preserves_predecessors_and_successors() -> None:

@@ -61,12 +61,60 @@ to answer a system question — an application concern, not a domain one
 convenience over the module-level functions below (matching the shape a
 caller actually wants: `analyzer.reverse_impact(entity_id=...)`), not a
 second implementation of them.
+
+## Coverage is not confidence (Impact Analysis v0.2)
+
+A correct traversal is not automatically a complete answer. `reverse_impact`
+returning two paths for `Payment.status` is a true statement about the
+edges Hashira's adapters actually captured — it is not the same claim as
+"nothing else in the system touches `Payment.status`", and collapsing those
+two claims into one silent result is exactly the failure a real agent
+experiment (`docs/ROADMAP.md`'s entry on this milestone) surfaced: a
+capable agent had to redo the entire investigation by hand because a
+too-small result gave no signal that it might be too small.
+
+`Confidence` (`core/enums.py`) answers "how strong is the evidence *for a
+relationship that exists*" — it says nothing about relationships that were
+never captured at all. `ImpactCoverage` is the missing, orthogonal axis:
+"how much of the relevant surface did this analysis actually examine."
+Three states, not two, describe any one candidate access site:
+
+* **FOUND** — a relationship was captured; it appears in `paths` with its
+  own, unmodified `Confidence`.
+* **NOT_OBSERVABLE** — the surface is structurally invisible to every
+  configured adapter (raw SQL, an unindexed external SDK, a dynamically
+  computed attribute name) — reported as a plain-language entry in
+  `ImpactCoverage.limitations`, sourced from `AdapterCapabilities.
+  known_limitations` (`ports/adapters.py`), never silently absent.
+* **recognized-but-unresolved** — an adapter saw *something* plausibly
+  relevant (an attribute name matching a real column) but could not
+  determine the accessing object's type through any provenance form it
+  supports — counted in `ImpactCoverage.unresolved_access_count`. This is
+  v0.2's honest, narrower stand-in for the ideal "examined and confirmed
+  absent" (`NOT_FOUND_AFTER_COVERAGE`) state described in `docs/IR.md`: it
+  is not a rigorous exhaustive-search proof, only a real, adapter-reported
+  count of accesses recognized as ambiguous rather than absent — see that
+  doc's entry for the full three-state framework this is a first, partial
+  implementation of.
+
+**Two invariants this module (and every caller) must keep**, per
+`docs/IR.md`:
+
+1. Every `ImpactResult` communicates whether its paths represent complete
+   analysis or known analytical limitations — zero paths never reads as
+   "nothing else exists" without `coverage` saying so explicitly.
+2. Coverage must never modify an individual relationship's `Confidence`. A
+   `CERTAIN` `CALLS` edge stays `CERTAIN` even inside a result whose overall
+   `coverage.status` is `PARTIAL` — weakening per-edge confidence to stand
+   in for incomplete analysis would quietly turn `Confidence` into the
+   "junk drawer" it was explicitly designed never to become.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from ..core.entities import Entity
 from ..core.enums import Confidence, RelationshipType
@@ -77,7 +125,9 @@ from ..ports.repositories import UnitOfWork
 from .history import HistoricalGraph, query_at_revision
 
 __all__ = [
+    "CoverageStatus",
     "ImpactAnalyzer",
+    "ImpactCoverage",
     "ImpactHop",
     "ImpactPath",
     "ImpactResult",
@@ -141,6 +191,7 @@ class ImpactResult:
     start: Entity
     revision: str | None
     paths: tuple[ImpactPath, ...]
+    coverage: ImpactCoverage
     resolved_from: str | None = None
     """Set when the requested `entity_id` was not present at `revision` and
     `resolve_identity` followed `SUPERSEDES` lineage to `start` instead --
@@ -150,6 +201,46 @@ class ImpactResult:
     @property
     def affected_entities(self) -> tuple[Entity, ...]:
         return tuple(path.endpoint for path in self.paths)
+
+
+class CoverageStatus(StrEnum):
+    """`COMPLETE`: nothing in this run's evidence points at an
+    unresolved or structurally-invisible surface relevant to this query.
+    `PARTIAL`: at least one does -- see `ImpactCoverage.unresolved_access_count`/
+    `.limitations` for which. `PARTIAL` is the expected, honest answer for
+    almost any real system today (raw SQL blindness alone guarantees it
+    whenever a SQLAlchemy-backed system is involved) -- it is not an alarm,
+    it is the truth this module now refuses to hide (module docstring's
+    "coverage is not confidence")."""
+
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+
+
+@dataclass(frozen=True, slots=True)
+class ImpactCoverage:
+    """What this analysis actually examined, distinct from what it found.
+
+    `unresolved_access_count` is `start`'s own
+    `metadata["unresolved_access_count"]` (set at indexing time by
+    `application.indexing` from adapter-reported `*.unresolved_field_access`
+    observations -- see `adapters/sqlalchemy/adapter.py`'s module docstring)
+    -- a real, adapter-reported count of accesses recognized as *plausibly*
+    relevant but not resolvable through any supported provenance form, not
+    a promise that every such access in the system was found.
+
+    `limitations` is the deduplicated `known_limitations` of every adapter
+    configured for this system's indexing pipeline (`AdapterCapabilities`,
+    `ports/adapters.py`), read off the latest complete `Snapshot`'s
+    `diagnostics` (`application.indexing` writes them there, prefixed, at
+    index time). Deliberately pipeline-wide, not scoped to this specific
+    query's entities -- v0.2's simplification; see `docs/IR.md`'s entry on
+    this milestone for why over-warning was chosen over the complexity of
+    per-query adapter attribution."""
+
+    status: CoverageStatus
+    unresolved_access_count: int
+    limitations: tuple[str, ...]
 
 
 def resolve_identity(graph: HistoricalGraph, entity_id: str) -> Entity | None:
@@ -448,7 +539,30 @@ def _impact(
         start=start,
         revision=revision,
         paths=paths,
+        coverage=_coverage_for(uow, system_id=system_id, start=start),
         resolved_from=resolved_from,
+    )
+
+
+_LIMITATION_PREFIX = "limitation: "
+
+
+def _coverage_for(uow: UnitOfWork, *, system_id: SystemID, start: Entity) -> ImpactCoverage:
+    """`unresolved_access_count` reads `start`'s own indexing-time metadata
+    (per-entity, precise); `limitations` reads the latest complete
+    snapshot's `diagnostics` (pipeline-wide, a v0.2 simplification -- see
+    `ImpactCoverage`'s own docstring)."""
+    unresolved_raw = start.metadata.get("unresolved_access_count", 0)
+    unresolved = unresolved_raw if isinstance(unresolved_raw, int) else 0
+    snapshot = uow.snapshots.latest_complete(system_id)
+    limitations = tuple(
+        diagnostic.removeprefix(_LIMITATION_PREFIX)
+        for diagnostic in (snapshot.diagnostics if snapshot else ())
+        if diagnostic.startswith(_LIMITATION_PREFIX)
+    )
+    status = CoverageStatus.PARTIAL if (unresolved or limitations) else CoverageStatus.COMPLETE
+    return ImpactCoverage(
+        status=status, unresolved_access_count=unresolved, limitations=limitations
     )
 
 

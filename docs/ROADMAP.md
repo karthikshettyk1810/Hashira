@@ -592,6 +592,96 @@ core rather than the adapter.
     _extract_declaration_renames` matches any `*.declaration_rename`
     observation kind -- but nothing yet produces one outside SQLAlchemy;
     watched, not built ahead of a second adapter's need).
+- [x] **Impact Analysis v0.2: coverage-aware analysis** — not requested in
+      advance; discovered by running the actual product research MCP read
+      surface v0.1 was built to enable: a real coding agent, given the MCP
+      server and one honest task ("map the blast radius of a
+      `Payment.status` representation change, no hints about which tools
+      exist"), against an unfamiliar, deliberately messy fixture with a
+      real historical rename, dynamic dispatch, an unresolved external SDK
+      call, and a raw-SQL worker. Baseline (no Hashira) and MCP-augmented
+      runs found the *same* impact set — Hashira did not save work, it cost
+      an extra detour — because `reverse_impact("payments.status")`
+      returned 2 correct paths while genuinely missing `PaymentService.
+      process`/`.refund` (SQLAlchemy's v0.1 field-access tracking only
+      recognized `payment = Payment()` local instantiation, not
+      `def process(self, payment: Payment)` typed parameters) and the
+      result carried no signal that it might be incomplete. The
+      augmented agent's own instinct ("that felt too small") saved it, not
+      anything Hashira told it — and its own wishlist named the fix
+      unprompted: *"a completeness/confidence indicator on reverse_impact
+      would help a lot."* The real finding: **a correct graph traversal is
+      not automatically a complete system answer**, and the fix ordering
+      matters — widen adapter coverage first and the exact same silent gap
+      just reopens one provenance form later (raw SQL, dynamic dispatch, a
+      repository abstraction, ...); establish coverage semantics first and
+      every future gap stays honest by construction. `docs/IR.md`'s
+      "Coverage is not confidence" entry has the full three-state framework
+      (`FOUND` / `NOT_OBSERVABLE` / recognized-but-unresolved) and the two
+      permanent invariants this milestone commits to.
+  - **`ImpactCoverage`** (`application/impact.py`, new): `status`
+    (`COMPLETE`/`PARTIAL`), `unresolved_access_count` (a real, per-query
+    count read off the queried entity's own `metadata`, populated at
+    indexing time from adapter-reported `*.unresolved_field_access`
+    observations), and `limitations` (adapter-declared, pipeline-wide
+    strings, e.g. "raw SQL is not analyzed", read off the latest complete
+    snapshot's `diagnostics`). `ImpactResult.coverage` is a *required*
+    field, deliberately -- a caller cannot construct a result that forgets
+    to say whether it is complete. Confidence stays exactly where it was:
+    per-hop, per-relationship, never touched by coverage
+    (`test_coverage_never_changes_a_hop_s_confidence` is the regression
+    test for that specific promise).
+  - **Two new, previously-unused extensibility points did the whole job,
+    zero `IR_VERSION` bump needed.** `AdapterCapabilities.known_limitations`
+    (`ports/adapters.py`, new field, not part of the versioned IR contract)
+    is where an adapter states its own gaps in plain language.
+    `Entity.metadata`/`Snapshot.diagnostics` (both existing, both
+    previously empty in practice) are where `application/indexing.py`
+    writes the per-column unresolved count and the pipeline-wide
+    limitations list, respectively -- `core`'s already-open extensibility
+    points turned out to be exactly the right shape for this, without
+    touching the versioned schema at all.
+  - **Typed object provenance, widened by one form (the first concrete
+    coverage improvement).** `adapters/sqlalchemy/adapter.py::
+    _typed_parameter_instances` (new) recognizes `def process(self,
+    payment: Payment)` as a second provenance form alongside the existing
+    `payment = Payment()` local instantiation -- "typed object provenance"
+    named explicitly as the general concept, of which a return value, an
+    attribute, a collection element, and a factory call remain unsupported
+    and stay named in `known_limitations` rather than silently absent. An
+    attribute access recognized as *plausibly* relevant (its name matches a
+    real column) but not resolvable through any supported form is reported
+    too, as a new `sqlalchemy.unresolved_field_access` observation kind --
+    scoped tightly to parameters specifically (not arbitrary local
+    variables) so an unrelated same-named attribute on some genuinely
+    unrelated object (a gateway SDK's response, say) is never miscounted.
+  - **Proven against the real, load-bearing fixture, not only synthetic
+    ones.** `PaymentService.mark_refunded` (new method,
+    `tests/fixtures/fastapi_checkout/payments/services.py`) writes
+    `payment.status` through a typed parameter; every existing test
+    asserting an exact `reverse_impact` affected-entity set for
+    `payments.status` had to be updated to include it --
+    `test_fastapi_sqlalchemy_together.py`, `test_impact_historical.py`,
+    `test_identity_evolution.py`, `test_mcp_read_surface.py` -- which is
+    itself the proof this reaches real code, not only a hand-built unit
+    fixture. `payments/reporting.py` (new file, raw SQL over
+    `payments.status`) is what `tests/integration/test_mcp_read_surface.py`
+    points at to prove the limitations warning survives a real MCP
+    protocol round trip, not just an internal call.
+  - **Deliberately not attempted: raw SQL parsing.** Per the milestone's
+    own explicit instruction -- building a parser now would repeat the
+    exact mistake being corrected. The limitation is named, not chased.
+  - **Not attempted in this pass**: `NOT_FOUND_AFTER_COVERAGE` in its
+    strictest form (an adapter affirmatively confirming no relevant access
+    exists at a specific site, rather than recognizing one it could not
+    resolve) -- v0.2's `unresolved_access_count` is an honest, narrower
+    stand-in, documented as such in `docs/IR.md`; per-query (rather than
+    pipeline-wide) adapter attribution for `limitations`, which would need
+    persisting which adapters actually produced a given snapshot; and the
+    second agent-experiment scenario (a fixture with genuinely full
+    coverage, to test whether `reverse_impact` becomes unwieldy at volume)
+    -- deliberately deferred until coverage semantics existed to interpret
+    that scenario's results honestly.
 
 ## Phase 4 — Agent integration
 

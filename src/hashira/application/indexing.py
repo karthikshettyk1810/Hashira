@@ -89,6 +89,31 @@ this is an addition, not a replacement of the old behavior's safety.
 
 None of this is unsafe — nothing is silently merged, overwritten, or deleted.
 
+## Coverage, surfaced rather than left implicit (Impact Analysis v0.2)
+
+Two more things get carried into the snapshot now, so `application.impact`
+can answer "how much of the relevant surface did this analysis actually
+examine" instead of only "what did it find" (`application/impact.py`'s
+module docstring, "coverage is not confidence"):
+
+- **Adapter-declared limitations** (`AdapterCapabilities.known_limitations`,
+  `ports/adapters.py`) from every configured adapter, deduplicated and
+  written onto the snapshot's `diagnostics` (an existing, previously-unused
+  field) as `"limitation: <text>"` entries — pipeline-wide, not scoped to
+  this run's specific findings, since which adapters are configured rarely
+  changes revision to revision. `application.impact` reads them back off
+  the latest complete snapshot.
+- **Unresolved field-access counts**, from `*.unresolved_field_access`
+  observations any data adapter reports this run (today, only
+  `adapters/sqlalchemy/adapter.py`) — a real, adapter-reported count of
+  attribute accesses recognized as plausibly relevant to one specific
+  column but not resolvable to a confirmed model instance. Written onto
+  that column entity's own `metadata["unresolved_access_count"]`
+  (`Entity.metadata` is already the documented home for technology-specific,
+  non-IR facts), recomputed fresh every run rather than accumulated, so a
+  provenance form this pipeline later learns to resolve correctly drops
+  back to zero instead of leaving a stale, misleading count behind.
+
 ## Revision ancestry, now recorded
 
 Each `git.commit` observation a history adapter reports carries that commit's
@@ -191,6 +216,23 @@ class IndexingService:
         self._history_adapters = history_adapters
         self._framework_adapters = framework_adapters
         self._data_adapters = data_adapters
+
+    def _collect_known_limitations(self) -> tuple[str, ...]:
+        """Every configured adapter's own `known_limitations`
+        (`AdapterCapabilities`, `ports/adapters.py`), deduplicated in
+        first-seen order -- the source `application.impact.ImpactCoverage`
+        surfaces via the snapshot's `diagnostics`."""
+        seen: dict[str, None] = {}
+        all_adapters = (
+            *self._adapters,
+            *self._framework_adapters,
+            *self._data_adapters,
+            *self._history_adapters,
+        )
+        for adapter in all_adapters:
+            for limitation in adapter.capabilities().known_limitations:
+                seen.setdefault(limitation, None)
+        return tuple(seen)
 
     def index(self, root: Path, *, system_id: SystemID, revision: str | None) -> IndexingResult:
         with self._uow_factory() as uow:
@@ -323,6 +365,7 @@ class IndexingService:
                 indexing_version=_INDEXING_VERSION,
                 ir_version=IR_VERSION,
                 status=SnapshotStatus.BUILDING,
+                diagnostics=[f"limitation: {text}" for text in self._collect_known_limitations()],
             )
         )
 
@@ -367,6 +410,24 @@ class IndexingService:
                 lineage_relationships.append(outcome.relationship)
             if outcome.inference is not None:
                 ambiguity_inferences.append(outcome.inference)
+
+        # Recomputed fresh every run, never accumulated: a provenance form
+        # this pipeline later learns to resolve must drop a column's count
+        # back to zero, not leave a stale one from a prior run standing.
+        unresolved_counts = _extract_unresolved_field_access_counts(observations)
+        resolved_entities = [
+            entity.model_copy(
+                update={
+                    "metadata": {
+                        **entity.metadata,
+                        "unresolved_access_count": unresolved_counts.get(entity.name, 0),
+                    }
+                }
+            )
+            if entity.metadata.get("kind") == "sqlalchemy_column"
+            else entity
+            for entity in resolved_entities
+        ]
 
         def remap(entity_id: str) -> str:
             return id_remap.get(entity_id, entity_id)
@@ -490,6 +551,25 @@ def _extract_renames(observations: Sequence[Observation]) -> list[GitRename]:
                 GitRename(old_path=old_path, new_path=new_path, similarity=float(similarity))
             )
     return renames
+
+
+def _extract_unresolved_field_access_counts(observations: Sequence[Observation]) -> dict[str, int]:
+    """Count `*.unresolved_field_access` observations (today, only
+    `adapters/sqlalchemy/adapter.py`'s) by the column *name* they name --
+    not a resolved column id, since not knowing which model an access
+    belongs to is exactly what makes it unresolved. Ambiguous by
+    construction when two models share a field name; see
+    `application/impact.py::ImpactCoverage`'s own docstring for why this
+    imprecision is an accepted, documented v0.2 simplification rather than
+    a bug to chase."""
+    counts: dict[str, int] = {}
+    for obs in observations:
+        if not obs.kind.endswith(".unresolved_field_access"):
+            continue
+        name = obs.payload.get("attribute_name")
+        if isinstance(name, str):
+            counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def _extract_declaration_renames(observations: Sequence[Observation]) -> list[DeclarationRename]:

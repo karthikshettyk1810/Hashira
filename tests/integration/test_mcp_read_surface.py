@@ -18,6 +18,14 @@ can discover a system concept, inspect why Hashira believes it exists,
 understand its impact, travel through history, and continue reasoning about
 the evolved concept -- without knowing anything about Django, FastAPI,
 SQLAlchemy, Git internals, SQLite, or Hashira's own Python implementation.
+
+Also asserts Impact Analysis v0.2's own definition of done: the
+`reverse_impact` response's `coverage` explicitly warns that
+`payments/reporting.py`'s raw-SQL reader (real, present in this fixture) is
+outside what any adapter can see -- a real agent experiment's own finding
+(`docs/ROADMAP.md`'s entry on this milestone) was that a too-small result
+with no such signal cost a capable agent the entire investigation over
+again, redone by hand.
 """
 
 from __future__ import annotations
@@ -51,6 +59,7 @@ FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "fastapi_checkout"
 
 _EXPECTED_AFFECTED = {
     "payments.services.PaymentService.process",
+    "payments.services.PaymentService.mark_refunded",
     "payments.routers.checkout",
     "payments.routers.router:POST /payments/checkout/",
     "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured",
@@ -163,6 +172,20 @@ def test_agent_discovers_impact_and_lineage_through_the_wire_protocol(
             for ev in hop["evidence"]:
                 assert ev["locator"]
                 assert ev["source"]["provider"]
+            # Coverage (Impact Analysis v0.2) travels alongside evidence,
+            # never into it: a CERTAIN hop stays CERTAIN even though this
+            # same result's coverage will say PARTIAL below.
+            assert hop["relationship"]["confidence"] == "CERTAIN"
+
+    # An agent asking about Payment.status over MCP is told, explicitly,
+    # that this codebase also has a raw-SQL reader
+    # (payments/reporting.py) no adapter can see -- not left to infer
+    # "empty means safe" from an otherwise-complete-looking result. This is
+    # the milestone's own non-negotiable: a zero/short paths list must
+    # never read as "nothing else exists" without coverage saying so.
+    coverage = impact_payload["coverage"]
+    assert coverage["status"] == "PARTIAL"
+    assert any("raw sql" in limitation.lower() for limitation in coverage["limitations"])
 
     # get_entity confirms the same id independently, with full context.
     entity_payload = asyncio.run(_call(server, "get_entity", {"entity_id": status_id}))

@@ -36,6 +36,12 @@ class AdapterCapabilities(BaseModel):
     relationship_types: list[RelationshipType] = Field(default_factory=list)
     requires_network: bool = False
     """True if the adapter contacts a remote service. Local-first mode refuses these (§29)."""
+    known_limitations: list[str] = Field(default_factory=list)
+    """Analytical gaps this adapter has, stated plainly (e.g. "raw SQL is not
+    analyzed"). Not a TODO list -- `application.impact` surfaces these
+    verbatim as `ImpactResult.coverage.limitations`, so an agent asking "did
+    you check everything" gets an honest answer instead of silence standing
+    in for "yes" (`docs/IR.md`'s "coverage is not confidence" entry)."""
 
 
 class ExtractionResult(BaseModel):

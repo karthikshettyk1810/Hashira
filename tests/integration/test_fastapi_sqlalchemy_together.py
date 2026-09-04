@@ -146,6 +146,7 @@ def test_route_to_table_is_one_fully_connected_graph(
     affected = _reverse_impact(entities, relationships, "payments.status")
     assert affected == {
         "payments.services.PaymentService.process",
+        "payments.services.PaymentService.mark_refunded",
         "payments.routers.checkout",
         "payments.routers.router:POST /payments/checkout/",
         "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured",

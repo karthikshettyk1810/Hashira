@@ -9,6 +9,7 @@ import pytest
 
 from hashira.application.history import query_at_revision
 from hashira.application.impact import (
+    CoverageStatus,
     ImpactAnalyzer,
     follow_lineage,
     forward_impact,
@@ -27,6 +28,8 @@ from hashira.core import (
     Origin,
     Relationship,
     RelationshipType,
+    Snapshot,
+    SnapshotStatus,
     SourceRef,
     System,
 )
@@ -572,3 +575,95 @@ def test_impact_analyzer_delegates_follow_lineage_too(db: MemoryDatabase, system
 
     assert len(result.predecessors) == 1
     assert result.predecessors[0].predecessor.id == a.id
+
+
+# --- coverage (Impact Analysis v0.2) -----------------------------------------
+
+
+def test_coverage_is_complete_with_no_snapshot_and_no_unresolved_metadata(
+    db: MemoryDatabase, system: System
+) -> None:
+    """No snapshot recorded at all (as in every other test in this file,
+    which never index anything), no `unresolved_access_count` on the start
+    entity -- coverage has nothing to report and reads COMPLETE."""
+    a = _entity(system, "a")
+    b = _entity(system, "b")
+    ev = _evidence(system)
+    _seed(db, system, [a, b], [_rel(system, a, b, RelationshipType.CALLS, evidence=ev)], [ev])
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=b.id)
+
+    assert result.coverage.status is CoverageStatus.COMPLETE
+    assert result.coverage.unresolved_access_count == 0
+    assert result.coverage.limitations == ()
+
+
+def test_coverage_reflects_unresolved_access_count_on_the_start_entity(
+    db: MemoryDatabase, system: System
+) -> None:
+    field = _entity(system, "field").model_copy(update={"metadata": {"unresolved_access_count": 3}})
+    caller = _entity(system, "caller")
+    ev = _evidence(system)
+    _seed(
+        db,
+        system,
+        [caller, field],
+        [_rel(system, caller, field, RelationshipType.WRITES, evidence=ev)],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=field.id)
+
+    assert result.coverage.unresolved_access_count == 3
+    assert result.coverage.status is CoverageStatus.PARTIAL
+
+
+def test_coverage_reads_limitations_off_the_latest_complete_snapshot(
+    db: MemoryDatabase, system: System
+) -> None:
+    a = _entity(system, "a")
+    b = _entity(system, "b")
+    ev = _evidence(system)
+    _seed(db, system, [a, b], [_rel(system, a, b, RelationshipType.CALLS, evidence=ev)], [ev])
+    with db.unit_of_work() as uow:
+        uow.snapshots.create(
+            Snapshot(
+                system_id=system.id,
+                revision="rev1",
+                indexing_version="0.1.0",
+                ir_version="0.1.5",
+                status=SnapshotStatus.COMPLETE,
+                diagnostics=[
+                    "limitation: raw SQL is not analyzed",
+                    "not a limitation, some other diagnostic",
+                ],
+            )
+        )
+        uow.commit()
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=b.id)
+
+    assert result.coverage.limitations == ("raw SQL is not analyzed",)
+    assert result.coverage.status is CoverageStatus.PARTIAL
+
+
+def test_coverage_never_changes_a_hop_s_confidence(db: MemoryDatabase, system: System) -> None:
+    """The invariant `docs/IR.md` states explicitly: coverage is reported
+    alongside a result, never folded into `Confidence` -- a CERTAIN edge
+    stays CERTAIN even when `coverage.status` is PARTIAL."""
+    field = _entity(system, "field").model_copy(update={"metadata": {"unresolved_access_count": 1}})
+    caller = _entity(system, "caller")
+    ev = _evidence(system)
+    rel = _rel(
+        system, caller, field, RelationshipType.WRITES, evidence=ev, confidence=Confidence.CERTAIN
+    )
+    _seed(db, system, [caller, field], [rel], [ev])
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=field.id)
+
+    assert result.coverage.status is CoverageStatus.PARTIAL
+    assert result.paths[0].hops[0].relationship.confidence is Confidence.CERTAIN

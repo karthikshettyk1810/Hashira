@@ -366,3 +366,92 @@ new name yet" is itself the thing worth being able to answer precisely.
 later revision, transparently follows the lineage and reports exactly what
 was truly reachable at that point — empty, in the gap between the two
 commits; the full chain again, once the usage caught up.
+
+## Coverage is not confidence — Impact Analysis v0.2
+
+A real agent experiment run against Hashira's own MCP read surface (§27;
+`docs/ROADMAP.md`'s entry on this milestone has the full account) produced
+the finding this section exists to keep permanent: `reverse_impact`
+returning two paths for `Payment.status`, both `CERTAIN`, was a completely
+true statement about the edges Hashira's adapters actually captured — and
+a capable agent still had to redo the entire investigation by hand, because
+nothing in the result distinguished "this is everything" from "this is
+everything we happened to find." A correct traversal is not automatically
+a complete answer, and treating the two as the same claim is a product bug,
+not merely an internal one.
+
+**Three states, not two, describe any one candidate access site** (a
+`payment.status` read, say):
+
+- **FOUND** — a relationship was captured; it appears in `paths` with its
+  own, unmodified `Confidence`. Confidence and coverage answer different
+  questions: `Confidence` is "how strong is the evidence *for a
+  relationship that exists*"; coverage is "how much of the relevant
+  surface did this analysis examine at all." A `CERTAIN` `WRITES` edge says
+  nothing about whether some *other* write to the same field went
+  unobserved.
+- **NOT_OBSERVABLE** — the surface is structurally invisible to every
+  configured adapter (raw SQL, an unindexed external SDK, a dynamically
+  computed attribute name). No adapter has a foothold to even enumerate
+  these, so they are reported categorically, as plain-language entries in
+  `ImpactCoverage.limitations` (`application/impact.py`), sourced from
+  `AdapterCapabilities.known_limitations` (`ports/adapters.py`) — never
+  silently absent from a result that otherwise looks complete.
+- **recognized-but-unresolved** — an adapter saw something plausibly
+  relevant (an attribute name matching a real column) but could not
+  determine the accessing object's type through any provenance form it
+  supports, and says so, counted in `ImpactCoverage.unresolved_access_count`.
+  This is v0.2's honest, *narrower* stand-in for the ideal
+  `NOT_FOUND_AFTER_COVERAGE` state (an adapter examining a specific
+  accessor and affirmatively confirming no relevant access exists there) —
+  Hashira does not yet produce that rigorous a guarantee; what it produces
+  instead is a real, adapter-reported count of accesses it recognized as
+  ambiguous rather than either resolving or ignoring them. The distinction
+  from `NOT_OBSERVABLE` matters and must never collapse: "we looked and
+  couldn't tell" is not the same claim as "there is nothing here to look
+  at," and conflating them is exactly the bug the agent experiment found.
+
+**Two invariants, now permanent, not just a description of what v0.2
+happens to do:**
+
+1. Every `ImpactResult` communicates whether its paths represent complete
+   analysis or known analytical limitations. Zero (or few) paths must never
+   read as "nothing else exists" without `coverage` saying so explicitly —
+   `ImpactResult.coverage` is a required field, not optional, precisely so
+   this cannot be silently omitted.
+2. Coverage must never modify an individual relationship's `Confidence`. A
+   `CERTAIN` edge stays `CERTAIN` inside a result whose `coverage.status`
+   is `PARTIAL` — weakening per-edge confidence to stand in for incomplete
+   analysis would turn `Confidence` into exactly the score-in-disguise
+   ["ordinal, not a float"](#confidence-is-ordinal-not-a-float) was
+   designed to refuse. `tests/unit/test_impact.py::
+   test_coverage_never_changes_a_hop_s_confidence` is the regression test.
+
+**Typed object provenance, widened by one form.** `_local_model_instances`
+(`payment = Payment()`) was the only provenance `adapters/sqlalchemy/
+adapter.py` recognized before this milestone. v0.2 adds
+`_typed_parameter_instances` (`def process(self, payment: Payment)`) — the
+second of what the module docstring calls "typed object provenance," a
+general concept of which local instantiation and typed parameters are only
+two forms; a return value, an attribute, a collection element, and a
+factory call remain unsupported and are named explicitly rather than
+guessed past. Proven against the real, load-bearing `fastapi_checkout`
+fixture: `PaymentService.mark_refunded(self, payment: Payment)` (new in
+this milestone) is now a genuine `WRITES` edge in `reverse_impact`'s
+result, where before this change it would have been silently absent —
+every existing test asserting an exact affected-entity set had to be
+updated to include it, which is itself evidence the fix reaches real code,
+not only synthetic unit fixtures.
+
+**Deliberately not attempted: raw SQL parsing.** The agent experiment's
+raw-SQL finding (a worker reading a renamed-away column through
+`sqlalchemy.text(...)`) was resolved by making the limitation *visible*
+(`AdapterCapabilities.known_limitations`), not by building a parser for it.
+Building the parser first would have repeated the exact mistake this
+milestone exists to correct: each future adapter capability just moves the
+point at which an unflagged gap becomes misleading again, unless coverage
+semantics exist first to make every remaining gap honest. `payments/
+reporting.py` (new in the `fastapi_checkout` fixture) is a real raw-SQL
+reader over `payments.status`; `tests/integration/test_mcp_read_surface.py`
+asserts that an MCP `reverse_impact` response for that column explicitly
+names this limitation, over the real wire protocol, not just internally.

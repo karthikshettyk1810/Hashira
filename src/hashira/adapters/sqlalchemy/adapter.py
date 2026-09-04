@@ -47,14 +47,29 @@ match against `"table.column"` qualified names -- deliberately not against
 `ForeignKey(Account.id)`'s attribute-reference form, which needs
 cross-class resolution this milestone does not attempt.
 
-**Basic read/write evidence only.** `_extract_field_accesses` mirrors
-Django's `LOCAL_INSTANCE`-scoped pattern exactly (`payment = Payment()`,
-then `payment.status = ...` / `... payment.status`) -- kept as this
-adapter's own, independent copy rather than shared with Django's, on
-purpose: the milestone this was built from was explicit that Django's model
-handling should not be refactored into shared plumbing *yet*, only once a
-second adapter's independent needs prove what is actually common (see
-`docs/ROADMAP.md`'s entry on this milestone).
+**Read/write evidence through two provenance forms.** `_extract_field_accesses`
+started (v0.1) mirroring Django's `LOCAL_INSTANCE`-scoped pattern exactly
+(`payment = Payment()`, then `payment.status = ...` / `... payment.status`)
+-- kept as this adapter's own, independent copy rather than shared with
+Django's, on purpose: the milestone this was built from was explicit that
+Django's model handling should not be refactored into shared plumbing *yet*,
+only once a second adapter's independent needs prove what is actually
+common (see `docs/ROADMAP.md`'s entry on this milestone). v0.2 (the
+"coverage-aware analysis" milestone) added a second, equally common
+provenance form: a typed parameter (`def process(self, payment: Payment)`),
+via `_typed_parameter_instances` -- the general concept is "typed object
+provenance," of which local instantiation and typed parameters are only
+two forms; a return value, an attribute, a collection element, and a
+factory call remain unsupported and are named explicitly in
+`capabilities().known_limitations`, never silently treated as absent (see
+`docs/IR.md`'s "coverage is not confidence" entry for why that distinction
+is load-bearing). An attribute access this adapter recognizes as *plausibly*
+relevant (its name matches a real column somewhere) but cannot resolve
+because the accessing parameter's type is unsupported/unannotated is
+reported too, as a `sqlalchemy.unresolved_field_access` observation --
+`application.impact` turns a count of these into `ImpactResult.coverage`,
+so a caller sees "we looked and couldn't tell" rather than a result
+indistinguishable from "there was nothing there."
 
 **A column that was renamed *within* an unchanged file is a different
 problem from a file rename, and gets a different mechanism.** Git's own
@@ -74,10 +89,12 @@ that function's own docstring for why "the name looks similar" is not
 something this project's identity model has ever been allowed to trust on
 its own, and this is no exception.
 
-**Out of scope for v0.1**, matching the milestone's explicit "keep it
+**Out of scope for v0.1/v0.2**, matching the milestone's explicit "keep it
 narrow": query-shape analysis, sessions/transactions, async SQLAlchemy,
 Alembic migrations (`MIGRATION_LINEAGE` stays unused until one exists), raw
-SQL, hybrid properties, `relationship(...)` construct parsing (SQLAlchemy's
+SQL (deliberately -- see `docs/IR.md`'s "coverage is not confidence" entry
+for why v0.2 chose to make this limitation *visible* rather than build a
+raw-SQL parser), hybrid properties, `relationship(...)` construct parsing (SQLAlchemy's
 own ORM-level association helper -- "deep relationship inference" was
 explicitly excluded; only a column's direct `ForeignKey(...)` argument is
 read), multi-hop `ForeignKey` chains beyond a direct string reference, a
@@ -129,6 +146,14 @@ class SQLAlchemyAdapter:
             # here, this produces Observations only -- normalizer.py builds
             # the graph.
             requires_network=False,
+            known_limitations=[
+                "Raw SQL (e.g. sqlalchemy.text(...)) is not analyzed for column "
+                "reads or writes -- only ORM attribute access is tracked.",
+                "An instance's model type is tracked only through local "
+                "instantiation (`x = Model()`) and typed parameters "
+                "(`def f(x: Model)`) -- not through return values, attributes, "
+                "or collection elements.",
+            ],
         )
 
     def detect(self, root: Path) -> bool:
@@ -261,7 +286,9 @@ class SQLAlchemyAdapter:
                 if tree is None:
                     continue
                 ctx = _augmented_context(index, module_qn, local_names_by_module)
-                accesses = _extract_field_accesses(tree, module_qn, ctx, models, columns_by_model)
+                accesses, unresolved_accesses = _extract_field_accesses(
+                    tree, module_qn, ctx, models, columns_by_model
+                )
                 for access in accesses:
                     access_kind = str(access["access_kind"])
                     result.observations.append(
@@ -277,6 +304,23 @@ class SQLAlchemyAdapter:
                             ),
                             file=file_rel,
                             line=int(access["line"]),  # type: ignore[call-overload]
+                            now=now,
+                        )
+                    )
+                for unresolved in unresolved_accesses:
+                    result.observations.append(
+                        _emit(
+                            result,
+                            system_id=system_id,
+                            kind="sqlalchemy.unresolved_field_access",
+                            payload=unresolved,
+                            summary=(
+                                f"{unresolved['accessor_qualified_name']} accesses "
+                                f".{unresolved['attribute_name']} on a parameter of "
+                                "undetermined model type"
+                            ),
+                            file=file_rel,
+                            line=int(unresolved["line"]),  # type: ignore[call-overload]
                             now=now,
                         )
                     )
@@ -596,20 +640,72 @@ def _local_model_instances(
     return types
 
 
+def _typed_parameter_instances(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ctx: ResolutionContext,
+    models: dict[str, dict[str, object]],
+) -> dict[str, str]:
+    """`def f(payment: Payment)` -- a parameter's own type annotation, the
+    second of the "typed object provenance" forms this adapter recognizes
+    (the module docstring's `_local_model_instances` covers the first,
+    `payment = Payment()`). Resolved against the *module*-level context
+    (an annotation names an imported class, not a local variable), unlike
+    the local-instance case which only matters inside the function body.
+    `self`/`cls` are skipped -- they are never a candidate here, and
+    `resolve_expr`'s own `SELF` resolution already covers `self.attr`.
+
+    Every other way an object can carry model type -- a return value, an
+    attribute, a collection element, a factory call -- is a *remaining*,
+    explicitly unsupported provenance form; `capabilities().known_limitations`
+    says so, `application.impact`'s coverage reporting surfaces it, and nothing
+    here pretends otherwise by guessing.
+    """
+    types: dict[str, str] = {}
+    args = func_node.args
+    for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+        if arg.arg in ("self", "cls") or arg.annotation is None:
+            continue
+        resolved = resolve_expr(arg.annotation, ctx)
+        if resolved.qualified_name in models:
+            types[arg.arg] = resolved.qualified_name
+    return types
+
+
 def _extract_field_accesses(
     tree: ast.Module,
     module_qn: str,
     ctx: ResolutionContext,
     models: dict[str, dict[str, object]],
     columns_by_model: dict[str, dict[str, str]],
-) -> list[dict[str, object]]:
-    """Every `instance.column` read or write, for an `instance` that is a
-    *local, direct* assignment to a known model (`payment = Payment(...)`)
-    -- mirrors `adapters.django.adapter._extract_field_accesses`'s scope
-    exactly (kept independent; see the module docstring)."""
-    accesses: list[dict[str, object]] = []
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Every `instance.column` read or write, for an `instance` whose model
+    type is known through a *supported* provenance form -- local
+    instantiation (`payment = Payment(...)`) or a typed parameter
+    (`def f(payment: Payment)`); see `_local_model_instances` and
+    `_typed_parameter_instances`.
 
-    def collect(body: list[ast.stmt], func_qn: str, func_ctx: ResolutionContext) -> None:
+    Also returns unresolved candidates: `instance.field_name` where
+    `field_name` is a real column name on *some* known model, but
+    `instance` is a parameter whose declared type (or absence of one)
+    could not be matched to any model. This is deliberately narrow --
+    scoped to parameters only, not arbitrary local variables -- so an
+    unrelated same-named attribute on some other, genuinely unresolvable
+    object (a third-party SDK's response, say) is not miscounted as a
+    plausible ORM access; see the module docstring's own such example.
+    Mirrors `adapters.django.adapter._extract_field_accesses`'s scope for
+    the *resolved* half exactly (kept independent; see the module
+    docstring); the unresolved half is new to this adapter.
+    """
+    accesses: list[dict[str, object]] = []
+    unresolved: list[dict[str, object]] = []
+    known_field_names = {name for fields in columns_by_model.values() for name in fields}
+
+    def collect(
+        body: list[ast.stmt],
+        func_qn: str,
+        func_ctx: ResolutionContext,
+        unresolvable_params: set[str],
+    ) -> None:
         def walk(node: ast.AST) -> None:
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, ast.Attribute):
@@ -634,6 +730,18 @@ def _extract_field_accesses(
                                     "line": child.lineno,
                                 }
                             )
+                    elif (
+                        child.attr in known_field_names
+                        and isinstance(child.value, ast.Name)
+                        and child.value.id in unresolvable_params
+                    ):
+                        unresolved.append(
+                            {
+                                "accessor_qualified_name": func_qn,
+                                "attribute_name": child.attr,
+                                "line": child.lineno,
+                            }
+                        )
                 if isinstance(
                     child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
                 ):
@@ -650,17 +758,25 @@ def _extract_field_accesses(
             elif isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
                 func_qn = f"{qualified_name}.{stmt.name}"
                 local_types = _local_model_instances(stmt, ctx, models)
+                param_types = _typed_parameter_instances(stmt, ctx, models)
+                instance_types = {**param_types, **local_types}
                 func_ctx = ResolutionContext(
                     module_qualified_name=ctx.module_qualified_name,
                     imports=ctx.imports,
                     module_locals=ctx.module_locals,
-                    local_instance_types=local_types,
+                    local_instance_types=instance_types,
                 )
-                collect(stmt.body, func_qn, func_ctx)
+                all_params = {
+                    arg.arg
+                    for arg in (*stmt.args.posonlyargs, *stmt.args.args, *stmt.args.kwonlyargs)
+                    if arg.arg not in ("self", "cls")
+                }
+                unresolvable_params = all_params - instance_types.keys()
+                collect(stmt.body, func_qn, func_ctx, unresolvable_params)
                 walk_body(stmt.body, func_qn)
 
     walk_body(tree.body, module_qn)
-    return accesses
+    return accesses, unresolved
 
 
 def _emit(

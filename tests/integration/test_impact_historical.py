@@ -135,6 +135,7 @@ def test_impact_analysis_across_a_rename_and_a_structural_break(
     affected_at_a = {e.qualified_name for e in impact_at_a.affected_entities}
     assert affected_at_a == {
         "payments.services.PaymentService.process",
+        "payments.services.PaymentService.mark_refunded",
         "payments.routers.checkout",
         "payments.routers.router:POST /payments/checkout/",
         "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured",

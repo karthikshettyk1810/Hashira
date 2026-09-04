@@ -123,6 +123,7 @@ def test_declaration_lineage_survives_a_rename_the_usage_catches_up_to_later(
         )
     assert {e.qualified_name for e in impact_at_a.affected_entities} == {
         "payments.services.PaymentService.process",
+        "payments.services.PaymentService.mark_refunded",
         "payments.routers.checkout",
         "payments.routers.router:POST /payments/checkout/",
         "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured",
@@ -189,6 +190,7 @@ def test_declaration_lineage_survives_a_rename_the_usage_catches_up_to_later(
         )
     assert {e.qualified_name for e in impact_at_c.affected_entities} == {
         "payments.services.PaymentService.process",
+        "payments.services.PaymentService.mark_refunded",
         "payments.routers.checkout",
         "payments.routers.router:POST /payments/checkout/",
         "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured",
