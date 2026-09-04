@@ -517,10 +517,262 @@ def test_capabilities_state_known_limitations() -> None:
     limitations = SQLAlchemyAdapter().capabilities().known_limitations
     assert any(
         limitation.kind is LimitationKind.RAW_SQL
-        and limitation.scope is LimitationScope.FIELD_ACCESS
+        and limitation.scope is LimitationScope.RAW_SQL_REFERENCES
         and "raw sql" in limitation.detail.lower()
         for limitation in limitations
     )
+
+
+# --- constructor-keyword writes (Impact Analysis v0.4's own audit) ----------
+
+
+def test_constructor_keyword_write_is_detected(tmp_path: Path, system_id: str) -> None:
+    """`Payment(status="pending")` -- deterministic: the call itself names
+    the model, no instance tracking required at all."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        'from .models import Payment\n\n\ndef create():\n    return Payment(status="pending")\n',
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    accesses = _by_kind(addition, "sqlalchemy.field_access")
+    assert len(accesses) == 1
+    assert accesses[0].payload["access_kind"] == "WRITE"
+    assert accesses[0].payload["column_qualified_name"] == "payments.status"
+    assert accesses[0].payload["accessor_qualified_name"] == "payments.service.create"
+
+
+def test_constructor_keyword_does_not_invent_an_unknown_field(
+    tmp_path: Path, system_id: str
+) -> None:
+    """`Payment(foo="bar")` -- `foo` is not a column; nothing is emitted,
+    not a low-confidence guess."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "from .models import Payment\n\n\ndef create():\n    return Payment(foo='bar')\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.field_access") == []
+    assert _by_kind(addition, "sqlalchemy.unresolved_field_access") == []
+
+
+def test_constructor_keyword_write_resolves_through_an_import_alias(
+    tmp_path: Path, system_id: str
+) -> None:
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "from .models import Payment as PaymentModel\n\n\n"
+        "def create():\n"
+        '    return PaymentModel(status="pending")\n',
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    accesses = _by_kind(addition, "sqlalchemy.field_access")
+    assert len(accesses) == 1
+    assert accesses[0].payload["model_qualified_name"] == "payments.models.Payment"
+
+
+# --- dynamic attribute access: flagged, never resolved ----------------------
+
+
+def test_getattr_with_a_literal_known_field_name_is_flagged_not_resolved(
+    tmp_path: Path, system_id: str
+) -> None:
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "def read(payment):\n    return getattr(payment, 'status')\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.field_access") == []
+    unresolved = _by_kind(addition, "sqlalchemy.unresolved_field_access")
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["attribute_name"] == "status"
+    assert unresolved[0].payload["limitation_kind"] == LimitationKind.DYNAMIC_ATTRIBUTE_ACCESS.value
+
+
+def test_setattr_with_a_literal_known_field_name_is_flagged_not_resolved(
+    tmp_path: Path, system_id: str
+) -> None:
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "def write(payment):\n    setattr(payment, 'status', 'captured')\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.field_access") == []
+    unresolved = _by_kind(addition, "sqlalchemy.unresolved_field_access")
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["limitation_kind"] == LimitationKind.DYNAMIC_ATTRIBUTE_ACCESS.value
+
+
+def test_getattr_with_a_computed_name_is_not_flagged(tmp_path: Path, system_id: str) -> None:
+    """`getattr(payment, field_name)` names nothing this adapter can check
+    against a column list -- supporting it would mean guessing at a
+    runtime value, so it is correctly silent, not a false limitation."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "def read(payment, field_name):\n    return getattr(payment, field_name)\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.unresolved_field_access") == []
+
+
+# --- return-value provenance, widened: self/cls and chained calls -----------
+
+
+def test_self_method_return_value_is_flagged_not_resolved(tmp_path: Path, system_id: str) -> None:
+    """`self.find(...)` is deliberately never resolved, even though
+    `self`'s type is technically knowable -- resolving it while every
+    other unresolvable case stays a limitation would be an ad-hoc
+    exception, not a deliberate widening."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "from .models import Payment\n\n\n"
+        "class PaymentService:\n"
+        "    def find(self, payment_id) -> Payment:\n"
+        "        return Payment()\n\n"
+        "    def close(self, payment_id):\n"
+        "        payment = self.find(payment_id)\n"
+        "        return payment.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.field_access") == []
+    unresolved = _by_kind(addition, "sqlalchemy.unresolved_field_access")
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["accessor_qualified_name"] == (
+        "payments.service.PaymentService.close"
+    )
+    assert unresolved[0].payload["limitation_kind"] == LimitationKind.RETURN_VALUE_PROVENANCE.value
+
+
+def test_chained_return_value_is_flagged_not_resolved(tmp_path: Path, system_id: str) -> None:
+    """`b = a.other()` where `a` is itself return-value-sourced -- one hop
+    further than `_return_value_instances` follows, but recognizable
+    (via `call_derived_names`) as return-value-sourced rather than a
+    genuinely unrelated object, so it is flagged rather than silent."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/repository.py",
+        "class Wrapper:\n    def unwrap(self):\n        return None\n\n\n"
+        "class PaymentRepository:\n"
+        "    def get(self, payment_id) -> Wrapper:\n"
+        "        return Wrapper()\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "from .repository import PaymentRepository\n\n\n"
+        "class PaymentService:\n"
+        "    def close(self, repo: PaymentRepository, payment_id):\n"
+        "        wrapper = repo.get(payment_id)\n"
+        "        payment = wrapper.unwrap()\n"
+        "        return payment.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    assert _by_kind(addition, "sqlalchemy.field_access") == []
+    unresolved = _by_kind(addition, "sqlalchemy.unresolved_field_access")
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["limitation_kind"] == LimitationKind.RETURN_VALUE_PROVENANCE.value
 
 
 # --- declaration-rename detection (identity/declaration_evidence.py's raw material) --

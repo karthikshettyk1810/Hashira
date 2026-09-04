@@ -567,3 +567,114 @@ Each is logged so the next widening picks the right abstraction on
 purpose, rather than the current `AST → variable → field` shape being
 stretched to cover something structurally different from what it was
 built for.
+
+## v0.4: the field-access coverage audit
+
+Re-running the same agent experiment a *third* time, with structured
+limitations live, produced the cleanest result yet: the agent used
+`coverage.status == "PARTIAL"` exactly as designed — read `limitations`,
+investigated the one disclosed category (`RAW_SQL`) specifically, and
+confirmed it was real and consequential. But it also found something
+`coverage.limitations` never named at all: `Payment(status="pending")`
+constructor-keyword writes were not tracked as `WRITES` edges, in either
+direction (not resolved, not flagged as a limitation) — discovered only
+because the agent cross-checked the tool's relationship list against test
+files it had already read. The verdict this section exists to record:
+*"declared limitation ≠ exhaustive limitation inventory,"* so a full
+manual sweep remained the rational response even with a working,
+well-understood coverage mechanism. Structured coverage was validated;
+coverage *credibility* was the open problem.
+
+**The fix is not "add `CONSTRUCTOR_KEYWORD_WRITE` as a fourth limitation
+kind."** That would keep the same disclosure gap one row over. Instead:
+enumerate every syntactic/semantic way a mapped field can be touched,
+require each one to land on exactly one of two outcomes — `SUPPORTED`
+(a real edge) or a declared `LimitationKind` (never silence) — and make
+that enumeration an executable artifact
+(`tests/unit/test_sqlalchemy_coverage_matrix.py`) rather than a claim in
+prose that can drift from what the adapter actually does.
+
+**Constructor keyword writes are now `SUPPORTED`.** `Payment(status=x)`
+is deterministic to resolve — the call itself names the model, no
+instance-type tracking needed at all — so `_extract_field_accesses` now
+recognizes an `ast.Call` whose callee resolves to a known model and
+matches each keyword argument against that model's columns. `Payment(foo=
+"bar")` invents nothing (`foo` isn't a column); an alias
+(`from .models import Payment as PaymentModel`) still resolves, since
+resolution goes through the same `resolve_expr` machinery as every other
+form; two constructor calls to the same field from the same accessor
+dedupe into one relationship with both call sites' evidence retained
+(`adapters/_dedup.py`'s existing merge behavior — no normalizer change
+was needed, since a constructor-keyword observation is just another
+`sqlalchemy.field_access` with `access_kind: WRITE`); and the edge is
+retracted (`valid_until_revision` set) by the existing reconciliation
+mechanism (`application/indexing.py::_reconcile_relationships`) once the
+keyword argument disappears on re-index, the same "boring re-index is
+boring" guarantee every other structural edge already has.
+
+**Two of the three logged gaps are now `LimitationKind.DYNAMIC_ATTRIBUTE_ACCESS`
+and `LimitationKind.RETURN_VALUE_PROVENANCE` respectively — reported, not
+resolved, on purpose:**
+
+- `getattr(x, "status")`/`setattr(x, "status", v)` naming a real column by
+  a *literal* string are now detected and reported as
+  `DYNAMIC_ATTRIBUTE_ACCESS` — deliberately never turned into a real edge,
+  even though the literal makes resolution technically easy. The reasoning
+  stays exactly as this milestone's own instruction stated it: supporting
+  a literal name invites `getattr(x, field_name)`/`getattr(x, mapping[key])`
+  next, each requiring a fundamentally different, unbounded kind of
+  guessing. A computed name is correctly left silent (not a false
+  limitation): it names nothing this adapter can check against a column
+  list at all.
+- `self.method()`/`cls.method()` return values, and a chained return value
+  (`b = a.other()` where `a` is itself return-value-sourced), are now
+  reported as `RETURN_VALUE_PROVENANCE` rather than silently dropped.
+  `self`/`cls` are recognized by name, deliberately without resolving
+  which class they refer to — doing so would be an ad-hoc exception to
+  "unresolvable stays a limitation," not a deliberate widening. The
+  chained case is distinguished from a genuinely unrelated callee (an
+  external SDK's object) via `call_derived_names`: a name is only ever a
+  member of that set because `_return_value_instances` itself produced it
+  earlier in the same pass, so this stays precise rather than flagging
+  every unresolvable callee indiscriminately.
+
+**`LimitationScope` renamed for a real semantic reason, not aesthetics.**
+`FIELD_ACCESS` implied every limitation was about an AST attribute-access
+operation — true for `UNTYPED_PARAMETER`/`RETURN_VALUE_PROVENANCE`/
+`DYNAMIC_ATTRIBUTE_ACCESS`, but not for `RAW_SQL`, which has no attribute
+node for an analyzer to even consider; it references a field through a
+completely different surface (a query string). `LimitationScope` now
+distinguishes `ORM_ATTRIBUTE_ACCESS` (the four Python-AST-level kinds)
+from `RAW_SQL_REFERENCES` (the one kind that isn't) — coarser than `kind`,
+so a caller can ask "are there gaps in ORM attribute tracking" separately
+from "are there gaps in raw-SQL visibility," which the old single value
+could not express.
+
+**Deliberately still not attempted, kept separate on purpose:**
+
+- **Framework/runtime reflection** (Pydantic `orm_mode` reading an ORM
+  attribute with no source-level access at all) needs a framework adapter
+  producing its own explicit serialization evidence — this is implicit
+  framework behavior, not a Python-level provenance gap, and stacking it
+  onto `adapters/sqlalchemy`'s AST walker would conflate two genuinely
+  different mechanisms the way `RAW_SQL`'s old scope already warned
+  against.
+- **Dynamic dispatch with a *computed* name** — `getattr(obj, name)`,
+  `getattr(obj, mapping[key])` — stays entirely unresolved *and*
+  unreported: there is no literal to check, so nothing here can even
+  assert a specific field is at risk. Only the literal-name case
+  (`DYNAMIC_ATTRIBUTE_ACCESS`) is deterministic enough to report.
+- **Two-or-more-hop chains** (`c = b.y()` where `b = a.x()` where `a` is
+  itself return-value-sourced) — `call_derived_names` tracks one level of
+  "this name came from a call," which already reaches the common case;
+  extending it further is a bounded, known widening, not attempted here.
+
+**On `COMPLETE` as a status**: deliberately rare, and this section exists
+to keep it that way on purpose, not by accident. Reflection, monkeypatching,
+dynamic imports, runtime configuration, external processes, and generated
+code all make an unqualified claim of completeness dangerous for realistic
+Python. `CoverageStatus.COMPLETE` today means only "nothing in this run's
+evidence points at a known, declared gap" — closer in spirit to
+`COMPLETE_WITHIN_DECLARED_CAPABILITIES` than to "there cannot possibly be
+another dependency." No renaming is needed yet, but any future caller
+reasoning about `COMPLETE` should read it that way, not more strongly.

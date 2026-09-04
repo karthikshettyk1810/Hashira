@@ -50,21 +50,40 @@ class LimitationKind(StrEnum):
     RETURN_VALUE_PROVENANCE = "RETURN_VALUE_PROVENANCE"
     """An attribute access on a local variable assigned from a known
     object's method call, whose own return type is unannotated or does
-    not resolve to a known model. Distinct from `UNTYPED_PARAMETER`: this
-    is "we know who was called and couldn't tell what it returns," not
-    "we don't know what this parameter is at all"."""
+    not resolve to a known model -- including a call through `self`/`cls`
+    (deliberately not resolved -- see `adapters/sqlalchemy/adapter.py`'s
+    module docstring) and a chained return value (a call on a name that
+    is itself return-value-sourced, one hop further than this adapter
+    follows). Distinct from `UNTYPED_PARAMETER`: this is "we know a call
+    produced this value and couldn't tell what it returns," not "we don't
+    know what this parameter is at all"."""
+    DYNAMIC_ATTRIBUTE_ACCESS = "DYNAMIC_ATTRIBUTE_ACCESS"
+    """`getattr(obj, "field")`/`setattr(obj, "field", value)` naming a
+    real column by a literal string -- deliberately never resolved into
+    an edge, even though the literal makes it look easy: once dynamic
+    dispatch is "supported" for a literal name, the same code invites
+    `getattr(obj, variable)`/`getattr(obj, mapping[key])`, each requiring
+    a different, unbounded kind of guessing. Reported so the access does
+    not vanish silently, not because resolving it is hard."""
 
 
 class LimitationScope(StrEnum):
-    """What kind of analysis a `Limitation` bounds -- coarser than `kind`,
-    so a caller can ask "are there gaps in X" without enumerating every
-    specific kind. One value exists today because every `LimitationKind`
-    so far bounds the same thing (can Hashira tell whether a specific
-    field was read or written); the field is reserved for the day a
-    limitation exists outside field-access analysis (e.g. call-graph
-    resolution), not filled in speculatively before then."""
+    """Which analytical *surface* a `Limitation` bounds -- coarser than
+    `kind` (a caller can ask "are there gaps in raw SQL" without
+    enumerating every kind that could produce one), and deliberately
+    named after the surface being analyzed rather than an AST operation:
+    `RAW_SQL` doesn't do "field access" in the sense the other kinds do
+    (no attribute node exists for an analyzer to even consider), so
+    labeling it the same scope as an unresolved parameter would blur two
+    genuinely different capability boundaries into one."""
 
-    FIELD_ACCESS = "FIELD_ACCESS"
+    ORM_ATTRIBUTE_ACCESS = "ORM_ATTRIBUTE_ACCESS"
+    """Whether a specific attribute read/write, expressed somewhere in
+    Python source, can be traced to a known mapped field."""
+    RAW_SQL_REFERENCES = "RAW_SQL_REFERENCES"
+    """Whether a data entity/field is referenced from a raw query string
+    rather than through the ORM at all -- a different surface, not
+    analyzed by walking Python attribute access."""
 
 
 class Limitation(BaseModel):

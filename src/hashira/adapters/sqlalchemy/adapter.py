@@ -47,32 +47,52 @@ match against `"table.column"` qualified names -- deliberately not against
 `ForeignKey(Account.id)`'s attribute-reference form, which needs
 cross-class resolution this milestone does not attempt.
 
-**Read/write evidence through three provenance forms.** `_extract_field_accesses`
-started (v0.1) mirroring Django's `LOCAL_INSTANCE`-scoped pattern exactly
-(`payment = Payment()`, then `payment.status = ...` / `... payment.status`)
--- kept as this adapter's own, independent copy rather than shared with
-Django's, on purpose: the milestone this was built from was explicit that
-Django's model handling should not be refactored into shared plumbing *yet*,
-only once a second adapter's independent needs prove what is actually
-common (see `docs/ROADMAP.md`'s entry on this milestone). v0.2 added a
-typed parameter (`def process(self, payment: Payment)`, via
-`_typed_parameter_instances`); v0.3 added a known object's method return
-value (`payment = repo.get(...)`, via `_return_value_instances`, resolved
-through the callee's own `-> ReturnType` annotation, wherever it is
-actually defined). The general concept is "typed object provenance," of
-which these three are only some forms; an attribute, a collection element,
-and a factory call remain unsupported and are named explicitly in
-`capabilities().known_limitations` (structural gaps, e.g. raw SQL) or via
-per-entity `sqlalchemy.unresolved_field_access` observations (conditional
-gaps, tagged with *which* form fell short:
-`LimitationKind.UNTYPED_PARAMETER`/`.RETURN_VALUE_PROVENANCE`) -- never
-silently treated as absent (see `docs/IR.md`'s "coverage is not
-confidence" entry for why that distinction is load-bearing, and why it is
-a *category*, not a count, since v0.3). An attribute access this adapter
+**Read/write evidence through four provenance forms, plus a constructor
+shortcut.** `_extract_field_accesses` started (v0.1) mirroring Django's
+`LOCAL_INSTANCE`-scoped pattern exactly (`payment = Payment()`, then
+`payment.status = ...` / `... payment.status`) -- kept as this adapter's
+own, independent copy rather than shared with Django's, on purpose: the
+milestone this was built from was explicit that Django's model handling
+should not be refactored into shared plumbing *yet*, only once a second
+adapter's independent needs prove what is actually common (see
+`docs/ROADMAP.md`'s entry on this milestone). v0.2 added a typed parameter
+(`def process(self, payment: Payment)`, via `_typed_parameter_instances`,
+broadened in v0.4 to any known class, not only a model, since a non-model
+service/repository parameter needs to be trackable too); v0.3 added a
+known object's method return value (`payment = repo.get(...)`, via
+`_return_value_instances`, resolved through the callee's own `->
+ReturnType` annotation, wherever it is actually defined). v0.4 (the
+"field-access coverage audit" milestone) added a constructor keyword
+argument (`Payment(status=x)`) -- deterministic and requiring no instance
+tracking at all, since the call itself names the model -- and widened
+`_return_value_instances` to *report* (never resolve) two further
+call shapes: a call through `self`/`cls`, and a chained return value (a
+call on a name that is itself return-value-sourced, recognized via
+`call_derived_names` rather than guessed at generically).
+
+The general concept is "typed object provenance," of which these are only
+some forms; an attribute, a collection element, and a factory call remain
+entirely unsupported, and `getattr`/`setattr` with a *literal* field name
+are deliberately supported only as a reported limitation, never resolved
+into an edge (see `_check_dynamic_attribute_call`'s own docstring for why
+a literal name is not treated as an invitation to support dynamic dispatch
+generally). Every one of these is named explicitly, in one of two ways:
+`capabilities().known_limitations` for structural gaps that are true
+regardless of which entity is asked about (today: raw SQL), or per-entity
+`sqlalchemy.unresolved_field_access` observations for conditional gaps
+that depend on the specific code touching that entity, each tagged with
+*which* form fell short (`LimitationKind.UNTYPED_PARAMETER`/
+`.RETURN_VALUE_PROVENANCE`/`.DYNAMIC_ATTRIBUTE_ACCESS`) -- never silently
+treated as absent (see `docs/IR.md`'s "coverage is not confidence" entry
+for why that distinction is load-bearing, and why a limitation is a
+*category*, not a count, since v0.3). An attribute access this adapter
 recognizes as *plausibly* relevant (its name matches a real column
-somewhere) but cannot resolve is always reported this way, so a caller
-sees "we looked and couldn't tell" rather than a result indistinguishable
-from "there was nothing there."
+somewhere) but cannot resolve, or deliberately declines to resolve, is
+always reported this way, so a caller sees "we looked and couldn't tell"
+rather than a result indistinguishable from "there was nothing there."
+`tests/unit/test_sqlalchemy_coverage_matrix.py` is the audit table this
+paragraph describes, kept executable so it cannot silently drift from
+what the code actually does.
 
 **A column that was renamed *within* an unchanged file is a different
 problem from a file rename, and gets a different mechanism.** Git's own
@@ -92,20 +112,26 @@ that function's own docstring for why "the name looks similar" is not
 something this project's identity model has ever been allowed to trust on
 its own, and this is no exception.
 
-**Out of scope for v0.1/v0.2/v0.3**, matching the milestone's explicit "keep
-it narrow": query-shape analysis, sessions/transactions, async SQLAlchemy,
+**Out of scope for v0.1-v0.4**, matching the milestone's explicit "keep it
+narrow": query-shape analysis, sessions/transactions, async SQLAlchemy,
 Alembic migrations (`MIGRATION_LINEAGE` stays unused until one exists), raw
-SQL (deliberately -- see `docs/IR.md`'s "coverage is not confidence" entry
-for why v0.2 chose to make this limitation *visible* rather than build a
-raw-SQL parser), chained return values (`a().b()`, or a return value that is
-itself the result of another return value -- `_return_value_instances` is
-deliberately one-hop), `self.method()` return-value resolution (`resolve_expr`'s
-own `SELF` handling does not resolve a bare `self`, only `self.attr`; a
-future pass could special-case it, not this one), dynamic dispatch
-(`getattr(obj, name)(...)`), framework-level reflection (e.g. a Pydantic
-response model reading an ORM attribute it never names in source), hybrid
-properties, `relationship(...)` construct parsing (SQLAlchemy's
-own ORM-level association helper -- "deep relationship inference" was
+SQL parsing (deliberately -- see `docs/IR.md`'s "coverage is not
+confidence" entry for why v0.2 chose to make this limitation *visible*
+rather than build a parser for it), a return value that is itself the
+result of *two or more* further return values (`_return_value_instances`
+recognizes one level of chaining via `call_derived_names`, not an
+unbounded call graph), dynamic dispatch with a *computed* attribute name
+(`getattr(obj, name)`/`getattr(obj, mapping[key])` -- a literal name is
+reported as `DYNAMIC_ATTRIBUTE_ACCESS`; a computed one names nothing this
+adapter can check against a column list, so resolving it would mean
+guessing at a runtime value), framework-level reflection (e.g. a Pydantic
+response model reading an ORM attribute it never names in source --
+deliberately a different, future mechanism: this is implicit
+framework/runtime behavior, not a Python-level provenance gap, and
+belongs in a framework adapter producing its own explicit serialization
+evidence, not another case bolted onto this adapter's AST walker), hybrid
+properties, `relationship(...)` construct parsing (SQLAlchemy's own
+ORM-level association helper -- "deep relationship inference" was
 explicitly excluded; only a column's direct `ForeignKey(...)` argument is
 read), multi-hop `ForeignKey` chains beyond a direct string reference, a
 table itself being renamed (`__tablename__` changing is treated as a
@@ -165,7 +191,7 @@ class SQLAlchemyAdapter:
             known_limitations=[
                 Limitation(
                     kind=LimitationKind.RAW_SQL,
-                    scope=LimitationScope.FIELD_ACCESS,
+                    scope=LimitationScope.RAW_SQL_REFERENCES,
                     detail=(
                         "Raw SQL (e.g. sqlalchemy.text(...)) is not analyzed for "
                         "column reads or writes -- only ORM attribute access is "
@@ -793,23 +819,40 @@ def _return_value_instances(
     method call, resolved via that method's own return-type annotation
     (`_method_return_type`). `ctx.local_instance_types` must already
     carry the callee's own type (from local instantiation or a typed
-    parameter) for this to fire at all -- deliberately one-hop, not a
-    call graph: a return value that is itself the result of another
-    return value is a *further* unsupported form, not solved here.
+    parameter) for this to fire at all -- deliberately one-hop from a
+    *known* callee: a return value that is itself the result of *another*
+    return value is a further, deliberately unsupported form (see
+    `call_derived_names` below for what "further" means precisely).
 
     Returns `(resolved, unresolved)`. `resolved` maps a name to a model
     qualified name, exactly like `_local_class_instances`. `unresolved`
-    names locals recognized as return-value-sourced from a callee whose
-    own type *is* known, but whose method's return type could not be
-    pinned to a model -- reported as `RETURN_VALUE_PROVENANCE`, never
-    silently dropped. A callee whose own type is *not* known (an external
-    SDK's object, say) is not in either set: that is a different, deeper
-    gap than this function claims to cover, and guessing at it would be
-    exactly the false positive `_extract_field_accesses`'s own docstring
-    warns against.
+    names locals recognized as return-value-sourced but not resolvable to
+    a model, in three cases -- all reported as `RETURN_VALUE_PROVENANCE`,
+    never silently dropped:
+
+    1. The callee's own type is known and its method's return type is
+       unannotated or not a model (the original case).
+    2. The call is through `self`/`cls` -- deliberately *never* resolved,
+       even though `self`'s type is technically knowable from the
+       enclosing class: once dynamic dispatch and reflection stay
+       unsupported on principle, resolving `self` specially while every
+       other unresolvable case stays a limitation would be an
+       inconsistent, ad-hoc exception, not a deliberate widening.
+    3. The call's callee is itself a name this same function *already*
+       recognized as return-value-sourced (`call_derived_names`, tracked
+       across this whole one-pass walk) -- a genuine chain (`b = a.x()`
+       where `a = obj.get()`), distinguished from a callee this function
+       has never seen at all (an external SDK's object, a plain import),
+       which stays silent, matching the false-positive discipline
+       `_extract_field_accesses`'s own docstring describes. This
+       distinction is what makes "chained" a *reportable* gap rather than
+       indistinguishable noise: a name is only ever added to
+       `call_derived_names` by this function itself, never guessed at
+       from an unrelated variable that merely looks similar.
     """
     resolved: dict[str, str] = {}
     unresolved: set[str] = set()
+    call_derived_names: set[str] = set()
 
     def check(node: ast.AST) -> None:
         target: ast.expr | None = None
@@ -833,21 +876,38 @@ def _return_value_instances(
         ):
             return
         assert isinstance(target, ast.Name)
-        callee_qn = resolve_expr(value.func.value, ctx).qualified_name
-        if callee_qn is None or callee_qn not in index.class_module:
-            return  # the callee's own type is unknown -- a different, deeper gap
-        return_qn = _method_return_type(
-            callee_qn,
-            value.func.attr,
-            index=index,
-            trees=trees,
-            models=models,
-            cache=return_type_cache,
-        )
-        if return_qn is not None:
-            resolved[target.id] = return_qn
-        else:
+        callee_expr = value.func.value
+
+        if isinstance(callee_expr, ast.Name) and callee_expr.id in ("self", "cls"):
             unresolved.add(target.id)
+            call_derived_names.add(target.id)
+            return
+
+        callee_qn = resolve_expr(callee_expr, ctx).qualified_name
+        if callee_qn is not None and callee_qn in index.class_module:
+            return_qn = _method_return_type(
+                callee_qn,
+                value.func.attr,
+                index=index,
+                trees=trees,
+                models=models,
+                cache=return_type_cache,
+            )
+            if return_qn is not None:
+                resolved[target.id] = return_qn
+            else:
+                unresolved.add(target.id)
+            call_derived_names.add(target.id)
+            return
+
+        if isinstance(callee_expr, ast.Name) and callee_expr.id in call_derived_names:
+            unresolved.add(target.id)
+            call_derived_names.add(target.id)
+            return
+
+        # The callee's own type was never seen at all -- a different,
+        # deeper gap than "we know who was called"; stay silent rather
+        # than guess (the external-SDK-object case).
 
     def walk(node: ast.AST) -> None:
         check(node)
@@ -859,6 +919,43 @@ def _return_value_instances(
     for stmt in func_node.body:
         walk(stmt)
     return resolved, unresolved
+
+
+def _check_dynamic_attribute_call(
+    call: ast.Call,
+    func_qn: str,
+    known_field_names: set[str],
+    unresolved: list[dict[str, object]],
+) -> None:
+    """`getattr(x, "field")`/`setattr(x, "field", value)` naming a real
+    column by a literal string -- flagged as `DYNAMIC_ATTRIBUTE_ACCESS`
+    regardless of whether `x`'s own type is separately resolvable. Unlike
+    every other unresolved case in this module, this one is about the
+    *access form* being unsupported, not about not knowing `x`'s type --
+    see the module docstring for why a literal name is not treated as an
+    invitation to resolve it anyway.
+
+    A non-literal second argument (`getattr(x, field_name)`) names
+    nothing this adapter can check against a column list, so it is
+    correctly not flagged -- supporting that would mean guessing at a
+    runtime value, exactly what this adapter refuses to do.
+    """
+    if len(call.args) < 2 or not isinstance(call.args[0], ast.Name):
+        return
+    name_arg = call.args[1]
+    if not (isinstance(name_arg, ast.Constant) and isinstance(name_arg.value, str)):
+        return
+    attribute_name = name_arg.value
+    if attribute_name not in known_field_names:
+        return
+    unresolved.append(
+        {
+            "accessor_qualified_name": func_qn,
+            "attribute_name": attribute_name,
+            "limitation_kind": LimitationKind.DYNAMIC_ATTRIBUTE_ACCESS.value,
+            "line": call.lineno,
+        }
+    )
 
 
 def _extract_field_accesses(
@@ -877,18 +974,30 @@ def _extract_field_accesses(
     instantiation (`payment = Payment(...)`), a typed parameter
     (`def f(payment: Payment)`), or a known object's method return value
     (`payment = repo.get(...)`); see `_local_class_instances`,
-    `_typed_parameter_instances`, and `_return_value_instances`.
+    `_typed_parameter_instances`, and `_return_value_instances`. Also
+    covers `Payment(status=x)` -- a constructor keyword argument matching
+    a known column, deterministic and requiring no instance tracking at
+    all (the call itself names the model).
 
-    Also returns unresolved candidates: `instance.field_name` where
-    `field_name` is a real column name on *some* known model, but
-    `instance`'s type could not be resolved through any supported form --
-    each tagged with *which* form fell short (`limitation_kind`:
-    `UNTYPED_PARAMETER` or `RETURN_VALUE_PROVENANCE`). Deliberately
-    narrow -- scoped to parameters and known-callee return values, not
-    arbitrary local variables -- so an unrelated same-named attribute on
-    some other, genuinely unresolvable object (a third-party SDK's
-    response, say) is not miscounted as a plausible ORM access; see
-    `_return_value_instances`'s own docstring for exactly that example.
+    Also returns unresolved candidates, each tagged with *which*
+    supported form fell short (`limitation_kind`):
+
+    - `UNTYPED_PARAMETER`/`RETURN_VALUE_PROVENANCE`: `instance.field_name`
+      where `field_name` is a real column name on *some* known model, but
+      `instance`'s type could not be resolved through any supported form.
+      Deliberately narrow -- scoped to parameters and known-callee return
+      values, not arbitrary local variables -- so an unrelated same-named
+      attribute on some other, genuinely unresolvable object (a
+      third-party SDK's response, say) is not miscounted as a plausible
+      ORM access; see `_return_value_instances`'s own docstring for
+      exactly that example.
+    - `DYNAMIC_ATTRIBUTE_ACCESS`: `getattr(x, "field_name")`/
+      `setattr(x, "field_name", value)` naming a real column by a literal
+      string. Deliberately never resolved into a real access regardless
+      of whether `x`'s type happens to be known -- see this module's own
+      docstring for why a literal name is not treated as an invitation to
+      support dynamic dispatch generally.
+
     Mirrors `adapters.django.adapter._extract_field_accesses`'s scope for
     the *resolved*, local-instantiation half exactly (kept independent;
     see the module docstring); everything else here is new to this
@@ -950,6 +1059,28 @@ def _extract_field_accesses(
                                 "line": child.lineno,
                             }
                         )
+                elif isinstance(child, ast.Call):
+                    if isinstance(child.func, ast.Name) and child.func.id in (
+                        "getattr",
+                        "setattr",
+                    ):
+                        _check_dynamic_attribute_call(child, func_qn, known_field_names, unresolved)
+                    else:
+                        model_qn = resolve_expr(child.func, func_ctx).qualified_name
+                        fields = columns_by_model.get(model_qn) if model_qn else None
+                        if fields is not None:
+                            for kw in child.keywords:
+                                if kw.arg is not None and kw.arg in fields:
+                                    accesses.append(
+                                        {
+                                            "accessor_qualified_name": func_qn,
+                                            "model_qualified_name": model_qn,
+                                            "field_name": kw.arg,
+                                            "column_qualified_name": fields[kw.arg],
+                                            "access_kind": "WRITE",
+                                            "line": kw.value.lineno,
+                                        }
+                                    )
                 if isinstance(
                     child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
                 ):

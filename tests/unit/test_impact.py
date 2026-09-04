@@ -622,7 +622,7 @@ def test_coverage_reflects_limitation_kinds_on_the_start_entity(
     assert len(result.coverage.limitations) == 1
     limitation = result.coverage.limitations[0]
     assert limitation.kind is LimitationKind.RETURN_VALUE_PROVENANCE
-    assert limitation.scope is LimitationScope.FIELD_ACCESS
+    assert limitation.scope is LimitationScope.ORM_ATTRIBUTE_ACCESS
     assert limitation.detail
 
 
@@ -654,7 +654,7 @@ def test_coverage_reads_structural_limitations_off_the_latest_complete_snapshot(
     _seed(db, system, [a, b], [_rel(system, a, b, RelationshipType.CALLS, evidence=ev)], [ev])
     raw_sql = Limitation(
         kind=LimitationKind.RAW_SQL,
-        scope=LimitationScope.FIELD_ACCESS,
+        scope=LimitationScope.RAW_SQL_REFERENCES,
         detail="raw SQL is not analyzed",
     )
     with db.unit_of_work() as uow:

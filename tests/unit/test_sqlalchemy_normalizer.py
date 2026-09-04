@@ -164,6 +164,87 @@ def test_field_access_produces_reads_and_writes(tmp_path: Path, system_id: str) 
     assert len(reads) == 1
 
 
+def test_constructor_keyword_write_produces_a_writes_relationship(
+    tmp_path: Path, system_id: str
+) -> None:
+    """`Payment(status=x)` feeds the exact same Observation ->
+    Relationship pipeline as `payment.status = x` -- no normalizer change
+    was needed for this to work."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        'from .models import Payment\n\n\ndef create():\n    return Payment(status="pending")\n',
+    )
+    run = _run(tmp_path, system_id)
+    by_qn = {e.qualified_name: e for e in run.entities}
+    accessor = by_qn["payments.service.create"]
+    column = by_qn["payments.status"]
+
+    writes = [
+        r
+        for r in run.relationships
+        if r.type is RelationshipType.WRITES
+        and r.source_entity_id == accessor.id
+        and r.target_entity_id == column.id
+    ]
+    assert len(writes) == 1
+
+
+def test_two_constructor_calls_to_the_same_field_dedupe_with_merged_evidence(
+    tmp_path: Path, system_id: str
+) -> None:
+    """Two call sites, same accessor, same column, same access kind ->
+    one relationship row, not two -- `WRITES` means "does this happen at
+    all", not "how many times" (`adapters/_dedup.py`) -- with both call
+    sites' evidence retained on that one row."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "from .models import Payment\n\n\n"
+        "def create(succeeded):\n"
+        "    if succeeded:\n"
+        '        return Payment(status="captured")\n'
+        "    else:\n"
+        '        return Payment(status="failed")\n',
+    )
+    run = _run(tmp_path, system_id)
+    by_qn = {e.qualified_name: e for e in run.entities}
+    accessor = by_qn["payments.service.create"]
+    column = by_qn["payments.status"]
+
+    writes = [
+        r
+        for r in run.relationships
+        if r.type is RelationshipType.WRITES
+        and r.source_entity_id == accessor.id
+        and r.target_entity_id == column.id
+    ]
+    assert len(writes) == 1
+    assert len(writes[0].evidence_ids) == 2
+
+
 def test_the_full_impact_chain_is_reachable_from_the_column(tmp_path: Path, system_id: str) -> None:
     """The actual killer test: walking from `payments.status` backward
     through non-structural edges reaches the service method that touches it

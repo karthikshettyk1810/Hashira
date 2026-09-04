@@ -758,6 +758,78 @@ core rather than the adapter.
     the second agent-experiment scenario (full-coverage stress test) --
     still deferred, now behind two additional, unplanned iterations rather
     than one.
+- [x] **Impact Analysis v0.4: the field-access coverage audit** — a third
+      re-run of the same agent experiment, structured limitations live,
+      produced the cleanest result of the series: the agent read
+      `coverage.limitations`, specifically investigated the one disclosed
+      category (`RAW_SQL`), and confirmed it was real. It also found
+      something the tool never disclosed at all -- `Payment(status=x)`
+      constructor-keyword writes tracked as neither a resolved edge nor a
+      declared limitation -- by manually cross-checking the tool's
+      relationship list against files it had already read. The verdict:
+      *"declared limitation ≠ exhaustive limitation inventory,"* so a full
+      manual sweep stayed the rational move even with working, well-
+      understood coverage. The fix scoped here is not "add a fourth
+      limitation kind" (same disclosure gap, one row over) but an audit:
+      enumerate every syntactic way a mapped field can be touched, and
+      require each one to land on `SUPPORTED` or a declared
+      `LimitationKind` -- never silence -- as an executable artifact
+      (`tests/unit/test_sqlalchemy_coverage_matrix.py`), not a claim in
+      prose. `docs/IR.md`'s "field-access coverage audit" entry has the
+      full table and reasoning.
+  - **Constructor keyword writes are now `SUPPORTED`.** `Payment(status=x)`
+    is deterministic -- the call itself names the model, no instance
+    tracking needed. `adapters/sqlalchemy/adapter.py::_extract_field_accesses`
+    now matches an `ast.Call`'s keyword arguments against the resolved
+    callee's columns; `Payment(foo="bar")` invents nothing; an import
+    alias still resolves; two constructor calls to the same field dedupe
+    into one relationship with both call sites' evidence retained (the
+    existing `adapters/_dedup.py` merge -- no normalizer change needed,
+    since this is just another `sqlalchemy.field_access` observation); and
+    the edge is retracted by the existing reconciliation mechanism once
+    the keyword disappears on re-index, proven by a new integration test
+    (`tests/integration/test_sqlalchemy_constructor_writes.py`).
+  - **Two more gaps now reported, deliberately never resolved.**
+    `getattr(x, "status")`/`setattr(x, "status", v)` with a *literal*
+    field name are now detected and tagged `DYNAMIC_ATTRIBUTE_ACCESS` --
+    resolving them was explicitly rejected even though the literal makes
+    it technically easy, since supporting one literal-name case invites
+    `getattr(x, field_name)`/`getattr(x, mapping[key])` next, each a
+    fundamentally different and unbounded kind of guessing; a computed
+    name stays correctly silent, not a false limitation. `self`/`cls`
+    method-return values and one level of chained return value
+    (`b = a.other()` where `a` is itself return-value-sourced, recognized
+    via a new `call_derived_names` set rather than guessed at generically)
+    are now tagged `RETURN_VALUE_PROVENANCE` -- `self`/`cls` are
+    recognized by name without resolving which class they refer to,
+    deliberately, so this stays a reported gap rather than an ad-hoc
+    exception to "unresolvable stays a limitation."
+  - **`LimitationScope` renamed for semantics, not aesthetics.**
+    `FIELD_ACCESS` implied every limitation was an AST attribute-access
+    operation -- true for three kinds, but not `RAW_SQL`, which has no
+    attribute node at all; it references a field through a completely
+    different surface. Split into `ORM_ATTRIBUTE_ACCESS` and
+    `RAW_SQL_REFERENCES`, so a caller can ask about gaps in one surface
+    without the other. Zero `IR_VERSION` impact, same as v0.2/v0.3 --
+    `LimitationKind`/`LimitationScope` describe a boundary of Hashira's
+    own analysis, not the analyzed system.
+  - **Deliberately still not attempted, kept separate on purpose**:
+    framework/runtime reflection (Pydantic `orm_mode` -- needs a framework
+    adapter producing its own serialization evidence, not another AST
+    case here), dynamic dispatch with a *computed* name (no literal to
+    check, so nothing can even be asserted), and chains beyond one hop.
+    `docs/IR.md` has the reasoning for each.
+  - **Not attempted in this pass**: the three items above, and the
+    second agent-experiment scenario (full-coverage stress test) -- the
+    latter now deliberately waiting on a fourth re-run first, per the
+    milestone's own new success criterion: does an agent, given this
+    milestone's changes, discover *any* unsupported field-impact mechanism
+    Hashira neither modeled nor disclosed? If several adversarial passes
+    turn up nothing new, `PARTIAL` starts meaning "here are the specific
+    surfaces you still need to inspect manually" rather than "here are
+    some limitations we happen to know about" -- only then does beating
+    the ~55k-token no-Hashira baseline become a reasonable expectation
+    rather than a hope.
 
 ## Phase 4 — Agent integration
 

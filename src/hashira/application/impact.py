@@ -569,16 +569,23 @@ _LIMITATION_PREFIX = "limitation: "
 #: adapter declared them.
 _CONDITIONAL_LIMITATION_TEXT: dict[LimitationKind, tuple[LimitationScope, str]] = {
     LimitationKind.UNTYPED_PARAMETER: (
-        LimitationScope.FIELD_ACCESS,
+        LimitationScope.ORM_ATTRIBUTE_ACCESS,
         "This entity is accessed through at least one function parameter "
         "whose type could not be determined -- some reads/writes may be "
         "missing.",
     ),
     LimitationKind.RETURN_VALUE_PROVENANCE: (
-        LimitationScope.FIELD_ACCESS,
+        LimitationScope.ORM_ATTRIBUTE_ACCESS,
         "This entity is accessed through at least one local variable "
-        "assigned from a function or method's return value, whose return "
+        "assigned from a function or method's return value (including via "
+        "self/cls, or chained through another such variable), whose return "
         "type could not be resolved -- some reads/writes may be missing.",
+    ),
+    LimitationKind.DYNAMIC_ATTRIBUTE_ACCESS: (
+        LimitationScope.ORM_ATTRIBUTE_ACCESS,
+        "This entity is accessed through at least one getattr()/setattr() "
+        "call naming it by a literal string -- dynamic attribute access is "
+        "not resolved into an edge, so some reads/writes may be missing.",
     ),
 }
 

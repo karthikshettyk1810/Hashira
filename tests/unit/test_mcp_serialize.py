@@ -99,7 +99,7 @@ def test_serialize_impact_result_preserves_every_hop() -> None:
         limitations=(
             Limitation(
                 kind=LimitationKind.RAW_SQL,
-                scope=LimitationScope.FIELD_ACCESS,
+                scope=LimitationScope.RAW_SQL_REFERENCES,
                 detail="raw SQL is not analyzed",
             ),
         ),
@@ -126,7 +126,11 @@ def test_serialize_impact_result_preserves_every_hop() -> None:
     assert dumped["coverage"] == {
         "status": "PARTIAL",
         "limitations": [
-            {"kind": "RAW_SQL", "scope": "FIELD_ACCESS", "detail": "raw SQL is not analyzed"}
+            {
+                "kind": "RAW_SQL",
+                "scope": "RAW_SQL_REFERENCES",
+                "detail": "raw SQL is not analyzed",
+            }
         ],
     }
 
