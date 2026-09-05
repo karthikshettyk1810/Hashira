@@ -4,15 +4,20 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hashira"
-version = "0.1.0.dev0"
+dynamic = ["version"]
 description = "System Intelligence Runtime — an evidence-aware, time-aware model of a software system."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
+license-files = ["LICENSE"]
+authors = [
+  { name = "Karthik Shetty K", email = "karthik@thorsignia.in" },
+]
 keywords = ["software-architecture", "code-intelligence", "system-graph", "mcp", "static-analysis"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Software Development :: Quality Assurance",
@@ -41,8 +46,14 @@ dev = [
 [project.scripts]
 hashira = "hashira.cli.main:main"
 
+[tool.hatch.version]
+path = "src/hashira/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/hashira"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/hashira", "tests", "docs", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

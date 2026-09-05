@@ -6,6 +6,6 @@ for whichever AI agent the developer happens to be using.
 
 from .core.schema import IR_VERSION
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0a1"
 
 __all__ = ["IR_VERSION", "__version__"]

@@ -29,7 +29,24 @@ def _run_mcp(args: argparse.Namespace) -> int:
         print(f"error: no system with slug {args.system!r} in {args.db}", file=sys.stderr)
         return 1
 
-    from ..mcp import build_server
+    try:
+        from ..mcp import build_server
+    except ModuleNotFoundError as exc:
+        # `exc.name` is the first missing component of whatever dotted
+        # import failed -- "mcp" for a bare `import mcp`, but "mcp.server"
+        # (or deeper) when the top-level package resolves yet a submodule
+        # doesn't (e.g. an incompatible partial install). Either shape means
+        # the same thing to a user: the optional `mcp` dependency isn't
+        # usable, so both are treated as the same, actionable error rather
+        # than a raw traceback on a new user's first real command.
+        if exc.name != "mcp" and not (exc.name or "").startswith("mcp."):
+            raise
+        print(
+            "error: the 'mcp' package is required to run this command.\n"
+            '       install it with: pip install "hashira[mcp]"',
+            file=sys.stderr,
+        )
+        return 1
 
     # `SqliteDatabase.unit_of_work` returns the concrete `SqliteUnitOfWork`,
     # not the `UnitOfWork` protocol itself -- mypy's strict (invariant)

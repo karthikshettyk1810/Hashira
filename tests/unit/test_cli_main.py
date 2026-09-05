@@ -9,6 +9,7 @@ process boundary."""
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pytest
@@ -70,3 +71,32 @@ def test_run_mcp_builds_and_runs_the_server_for_a_known_system(
 def test_main_requires_a_subcommand() -> None:
     with pytest.raises(SystemExit):
         main([])
+
+
+def test_run_mcp_reports_a_clean_error_when_the_mcp_extra_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`pip install hashira` (no extra) leaves the `mcp` package absent --
+    `hashira mcp` must say so and point at the fix, not surface a raw
+    `ModuleNotFoundError` traceback as a new user's first real command."""
+    db_path = tmp_path / "hashira.db"
+    db = SqliteDatabase(str(db_path))
+    with db.unit_of_work() as uow:
+        uow.systems.save(System(name="Checkout", slug="checkout"))
+        uow.commit()
+
+    # Force the deferred `from ..mcp import build_server` to raise
+    # ModuleNotFoundError("mcp") exactly as it would with the extra absent,
+    # without needing a second, mcp-less test environment.
+    for name in [n for n in sys.modules if n == "mcp" or n.startswith("mcp.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    for name in [n for n in sys.modules if n == "hashira.mcp" or n.startswith("hashira.mcp.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setitem(sys.modules, "mcp", None)  # type: ignore[call-overload]
+
+    exit_code = _run_mcp(_args(db_path, "checkout"))
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "mcp" in err
+    assert 'pip install "hashira[mcp]"' in err
