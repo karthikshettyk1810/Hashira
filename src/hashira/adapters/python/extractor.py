@@ -119,10 +119,41 @@ def _module_level_imports(module_qn: str, module: ast.Module) -> dict[str, str]:
     return imports
 
 
+def _constructor_call(value: ast.expr) -> ast.Call | None:
+    """The bare constructor call `value` mechanically reduces to, if any --
+    either `value` itself, or, for the fallback-default idiom (`provided or
+    Constructor()`, e.g. `self._mcube = mcube_client or MCubeClient()`), the
+    last operand of an `or` chain when that last operand is itself a bare
+    call. A real production repository's dominant DI idiom (found by the
+    "Real Repository Pilot" benchmark, `docs/ROADMAP.md`) turned out to be
+    exactly this shape, not the plain `x = Cls()` form `_local_instance_types`/
+    `_self_attribute_types` already handled. Nothing else reduces: no
+    ternaries, no `and`, no arbitrary expression evaluation -- if the last
+    operand isn't a literal call, this returns `None`, the same as any other
+    unresolvable shape.
+
+    Caller beware, and this is by design, not an oversight: this function
+    only ever hands back a `Call` node, never a verdict on whether that
+    call's callee is actually a *class*. `resolve.py`'s own docstring on
+    this exact widening explains why a factory-function fallback
+    (`settings or get_settings()`) still produces a syntactically-derived
+    but semantically empty qualified name -- distinguishing "class" from
+    "function that returns one" needs the imported name's own definition,
+    which is a different file, which this stage never reads."""
+    if isinstance(value, ast.Call):
+        return value
+    if isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or) and value.values:
+        last = value.values[-1]
+        if isinstance(last, ast.Call):
+            return last
+    return None
+
+
 def _local_instance_types(
     func: ast.FunctionDef | ast.AsyncFunctionDef, ctx: ResolutionContext
 ) -> dict[str, str]:
-    """`name = ClassName(...)` assignments anywhere in the function's own
+    """`name = ClassName(...)` (or `name = provided or ClassName(...)` --
+    see `_constructor_call`) assignments anywhere in the function's own
     body, resolved only against imports/module-locals (never against other
     locals, so ordering ambiguity can't compound into a wrong chain of
     guesses). Nested defs are not descended into: their assignments belong to
@@ -144,8 +175,9 @@ def _local_instance_types(
             and node.value is not None
         ):
             target, value = node.target, node.value
-        if target is not None and isinstance(value, ast.Call):
-            resolved = resolve_expr(value.func, ctx)
+        call = _constructor_call(value) if value is not None else None
+        if target is not None and call is not None:
+            resolved = resolve_expr(call.func, ctx)
             if resolved.qualified_name is not None and resolved.resolution in (
                 "IMPORT",
                 "MODULE_LOCAL",
@@ -167,11 +199,13 @@ def _local_instance_types(
 
 def _self_attribute_types(class_node: ast.ClassDef, ctx: ResolutionContext) -> dict[str, str]:
     """`self.<attr> = KnownCallable(...)` / `self.<attr>: T = KnownCallable(...)`
-    assignments in the class's own `__init__`, resolved the same restricted
-    way `_local_instance_types` resolves a same-function local: only against
-    imports/module-locals, never against another guess. Scoped to `__init__`
-    alone, deliberately -- see `resolve.py`'s `SELF_ATTRIBUTE` docstring for
-    why this stays a bounded fix rather than general attribute-flow analysis.
+    (or the `provided or KnownCallable(...)` fallback-default idiom -- see
+    `_constructor_call`) assignments in the class's own `__init__`, resolved
+    the same restricted way `_local_instance_types` resolves a same-function
+    local: only against imports/module-locals, never against another guess.
+    Scoped to `__init__` alone, deliberately -- see `resolve.py`'s
+    `SELF_ATTRIBUTE` docstring for why this stays a bounded fix rather than
+    general attribute-flow analysis.
     """
     init = next(
         (
@@ -205,9 +239,10 @@ def _self_attribute_types(class_node: ast.ClassDef, ctx: ResolutionContext) -> d
             and node.value is not None
         ):
             target, value = node.target, node.value
-        if target is not None and isinstance(value, ast.Call):
+        call = _constructor_call(value) if value is not None else None
+        if target is not None and call is not None:
             assert isinstance(target, ast.Attribute)
-            resolved = resolve_expr(value.func, ctx)
+            resolved = resolve_expr(call.func, ctx)
             if resolved.qualified_name is not None and resolved.resolution in (
                 "IMPORT",
                 "MODULE_LOCAL",
@@ -223,6 +258,75 @@ def _self_attribute_types(class_node: ast.ClassDef, ctx: ResolutionContext) -> d
 
     for stmt in init.body:
         walk(stmt)
+    return types
+
+
+def _annotated_inner_type(annotation: ast.expr) -> ast.expr:
+    """`Annotated[T, ...]` (FastAPI's own `Depends(...)`/`Query(...)` idiom)
+    reduces to `T`; anything else is its own inner type, unchanged. Detected
+    syntactically -- the subscripted name/attribute's own text is
+    "Annotated" -- not via import resolution, matching how lightly this
+    module already treats syntactic shape elsewhere (e.g. `self`/`cls` by
+    name in `resolve.py`). No attempt is made to resolve `Depends(...)`'s
+    own callable or any other metadata argument -- only the first, type
+    position of the `Annotated[...]` subscript."""
+    if (
+        isinstance(annotation, ast.Subscript)
+        and isinstance(annotation.slice, ast.Tuple)
+        and annotation.slice.elts
+    ):
+        head = annotation.value
+        head_name = (
+            head.attr
+            if isinstance(head, ast.Attribute)
+            else head.id
+            if isinstance(head, ast.Name)
+            else None
+        )
+        if head_name == "Annotated":
+            return annotation.slice.elts[0]
+    return annotation
+
+
+def _parameter_instance_types(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, ctx: ResolutionContext
+) -> dict[str, str]:
+    """Every ordinary parameter's own type annotation (`Annotated[T, ...]`
+    reduced to `T` first -- `_annotated_inner_type`), resolved exactly as
+    restrictively as `_local_instance_types` resolves a same-function local:
+    only against imports/module-locals, never a guess layered on a guess.
+
+    A real production repository's route handlers -- `def receive(inbound:
+    IvrWebhookInbound, service: Annotated[IvrService, Depends(...)]):
+    inbound.resolve(...)` -- turned out to depend entirely on this: a plain
+    typed parameter calling a method on itself is arguably *the* most common
+    shape in any framework's request-handling code, and nothing in this
+    adapter resolved it before (`docs/ROADMAP.md`'s "Real Repository Pilot
+    v0.1, Phase 2" continuation has the full account). This is deliberately
+    a general Python-level fix, separate from `adapters/sqlalchemy`'s own
+    typed-parameter mechanism (`_typed_parameter_instances`), which exists
+    only to detect ORM field reads/writes on a narrower set of known model
+    classes -- this one feeds ordinary `CALLS` resolution for any
+    IMPORT/MODULE_LOCAL-resolvable type, model or not.
+
+    A parameter with no annotation, or one that doesn't resolve to
+    IMPORT/MODULE_LOCAL (an unannotated parameter, a builtin type, a type
+    variable, anything this adapter can't confirm against this file's own
+    imports/module-locals), is simply absent from the result -- never
+    guessed, never recorded as anything other than what it is: unresolved.
+    """
+    types: dict[str, str] = {}
+    params = [*func.args.posonlyargs, *func.args.args, *func.args.kwonlyargs]
+    for param in params:
+        if param.annotation is None:
+            continue
+        inner = _annotated_inner_type(param.annotation)
+        resolved = resolve_expr(inner, ctx)
+        if resolved.qualified_name is not None and resolved.resolution in (
+            "IMPORT",
+            "MODULE_LOCAL",
+        ):
+            types[param.arg] = resolved.qualified_name
     return types
 
 
@@ -428,8 +532,9 @@ class _Walker:
             line=node.lineno,
             col=node.col_offset,
         )
+        param_types = _parameter_instance_types(node, ctx)
         local_types = _local_instance_types(node, ctx)
-        func_ctx = dataclasses.replace(ctx, local_instance_types=local_types)
+        func_ctx = dataclasses.replace(ctx, local_instance_types={**param_types, **local_types})
         # `_walk_body` below already collects calls for every non-def statement
         # in `node.body` (via its `else: self._collect_calls(...)` branch) and
         # recurses into nested defs with their own scope — a second explicit

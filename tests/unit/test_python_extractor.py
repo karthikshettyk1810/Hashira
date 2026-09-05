@@ -287,6 +287,270 @@ class CheckoutView:
     assert calls["self._unrelated.charge"]["resolved_qualified_name"] is None
 
 
+# --- fallback-default idiom (`provided or Constructor()`) and typed ------
+# --- parameters (docs/ROADMAP.md's "Real Repository Pilot v0.1, Phase 2" -
+# --- continuation) --------------------------------------------------------
+
+
+def test_self_attribute_fallback_via_bare_class_constructor_resolves(
+    tmp_path: Path, system_id: str
+) -> None:
+    """`self._mcube = mcube_client or MCubeClient()` -- a real production
+    repository's dominant DI idiom (`docs/ROADMAP.md`'s Phase 2
+    continuation), and the case this fix genuinely closes: the fallback
+    operand is a bare call to something that resolves to a *class*, so its
+    own qualified name really is the resulting attribute's type."""
+    source = """
+from .clients import MCubeClient
+
+
+class NotificationService:
+    def __init__(self, mcube_client=None):
+        self._mcube = mcube_client or MCubeClient()
+
+    def send(self):
+        self._mcube.send_sms("x")
+"""
+    result = _extract(tmp_path, "shop/notify.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert calls["self._mcube.send_sms"]["resolution"] == "SELF_ATTRIBUTE"
+    assert (
+        calls["self._mcube.send_sms"]["resolved_qualified_name"]
+        == "shop.clients.MCubeClient.send_sms"
+    )
+
+
+def test_self_attribute_fallback_via_factory_function_is_a_disclosed_boundary(
+    tmp_path: Path, system_id: str
+) -> None:
+    """`self._settings = settings or get_settings()` -- the *other* real
+    shape the same repository used, and one this fix does NOT make
+    correct: `get_settings` is a plain factory *function* returning a
+    `Settings` instance, not a class named `get_settings`. Stage 1 has no
+    way to tell "imported class" from "imported function that returns one"
+    apart from an import statement alone -- that distinction requires
+    reading the imported module's own return-type annotation, which is
+    cross-file and out of this fix's bounded scope (and was never asked
+    for). This is not a new problem `_constructor_call` introduced: a bare,
+    non-fallback `self._settings = get_settings()` had exactly the same
+    limitation before this fix existed. Recording this explicitly as a
+    test, not silently: the resulting `resolved_qualified_name` is
+    syntactically produced but does not name a real entity, so
+    `normalizer.py`'s Stage 2 safely fails to promote it (no relationship
+    is fabricated) -- a miss, not a wrong answer, exactly per this
+    project's own "never invent a target" rule."""
+    source = """
+from .config import get_settings
+
+
+class IvrService:
+    def __init__(self, settings=None):
+        self._settings = settings or get_settings()
+
+    def handle(self):
+        self._settings.get_template_for_event("x")
+"""
+    result = _extract(tmp_path, "shop/ivr.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    # Stage 1 mechanically produces a qualified name here ("get_settings" is
+    # the only name it has to go on) -- but "shop.config.get_settings" is a
+    # function, not a class, so "shop.config.get_settings.get_template_for_event"
+    # names nothing real. Stage 2 (normalizer.py) is what actually protects
+    # correctness by never promoting a call whose target doesn't exist.
+    assert calls["self._settings.get_template_for_event"]["resolution"] == "SELF_ATTRIBUTE"
+    assert (
+        calls["self._settings.get_template_for_event"]["resolved_qualified_name"]
+        == "shop.config.get_settings.get_template_for_event"
+    )
+
+
+def test_local_fallback_default_idiom_resolves(tmp_path: Path, system_id: str) -> None:
+    """`x = provided or Constructor()` as a same-function local, mirroring
+    the self-attribute case but for `_local_instance_types`."""
+    source = """
+from .payments import PaymentService
+
+
+def checkout(provided=None):
+    payments = provided or PaymentService()
+    payments.process()
+"""
+    result = _extract(tmp_path, "shop/checkout.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert calls["payments.process"]["resolution"] == "LOCAL_INSTANCE"
+    assert (
+        calls["payments.process"]["resolved_qualified_name"]
+        == "shop.payments.PaymentService.process"
+    )
+
+
+def test_fallback_default_idiom_requires_a_bare_call_as_the_last_operand(
+    tmp_path: Path, system_id: str
+) -> None:
+    """`provided or fallback_name` (not a call) must not be guessed -- only
+    a literal call as the final `or` operand is mechanically strong enough
+    evidence."""
+    source = """
+def checkout(provided=None, fallback_name=None):
+    payments = provided or fallback_name
+    payments.process()
+"""
+    result = _extract(tmp_path, "shop/checkout.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert calls["payments.process"]["resolution"] == "UNRESOLVED"
+    assert calls["payments.process"]["resolved_qualified_name"] is None
+
+
+def test_typed_parameter_resolves_a_method_call_on_itself(tmp_path: Path, system_id: str) -> None:
+    """The other real-production gap: a plain typed parameter calling a
+    method on itself (`def receive(inbound: IvrWebhookInbound):
+    inbound.resolve(...)`) -- arguably the most common shape in any
+    framework's request-handling code -- was never resolved before."""
+    source = """
+from .webhook import IvrWebhookInbound
+
+
+def receive(inbound: IvrWebhookInbound):
+    inbound.resolve()
+"""
+    result = _extract(tmp_path, "shop/webhook.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert calls["inbound.resolve"]["resolution"] == "LOCAL_INSTANCE"
+    assert (
+        calls["inbound.resolve"]["resolved_qualified_name"]
+        == "shop.webhook.IvrWebhookInbound.resolve"
+    )
+
+
+def test_annotated_typed_parameter_resolves_a_method_call(tmp_path: Path, system_id: str) -> None:
+    """`Annotated[T, ...]` (FastAPI's `Depends(...)` idiom) reduces to `T`
+    before resolution -- the exact shape of `service: Annotated[IvrService,
+    Depends(get_ivr_service)]` in the real repository that surfaced this."""
+    source = """
+from typing import Annotated
+
+from .services import IvrService
+
+
+def receive(service: Annotated[IvrService, Depends(get_ivr_service)]):
+    service.handle_webhook()
+"""
+    result = _extract(tmp_path, "shop/webhook.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert calls["service.handle_webhook"]["resolution"] == "LOCAL_INSTANCE"
+    assert (
+        calls["service.handle_webhook"]["resolved_qualified_name"]
+        == "shop.services.IvrService.handle_webhook"
+    )
+
+
+def test_unresolvable_parameter_annotation_stays_unresolved(tmp_path: Path, system_id: str) -> None:
+    """A parameter typed with something this adapter can't confirm against
+    this file's own imports/module-locals (here, a builtin) must not be
+    guessed -- calling a method on it stays UNRESOLVED, same as an
+    unannotated parameter always has."""
+    source = """
+def handle(payload: dict):
+    payload.get("x")
+"""
+    result = _extract(tmp_path, "shop/handle.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert calls["payload.get"]["resolution"] == "UNRESOLVED"
+    assert calls["payload.get"]["resolved_qualified_name"] is None
+
+
+def test_local_reassignment_overrides_a_parameter_s_own_type(
+    tmp_path: Path, system_id: str
+) -> None:
+    """If a parameter is reassigned to a different known type within the
+    function body, the body's own assignment wins -- matching how a local
+    reassignment already overrides anything earlier in `_local_instance_types`
+    itself."""
+    source = """
+from .payments import PaymentService
+from .refunds import RefundService
+
+
+def checkout(payments: PaymentService):
+    payments = RefundService()
+    payments.process()
+"""
+    result = _extract(tmp_path, "shop/checkout.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert (
+        calls["payments.process"]["resolved_qualified_name"] == "shop.refunds.RefundService.process"
+    )
+
+
+def test_realistic_fastapi_route_resolves_end_to_end(tmp_path: Path, system_id: str) -> None:
+    """A minimal but realistic fixture reproducing the exact production
+    shape both gaps came from in one repository: a route function with an
+    `Annotated[T, Depends(...)]` parameter calling a method on itself, and a
+    service class composing a collaborator via the `provided or
+    Constructor()` fallback-default idiom, called from a different method
+    than the one that assigned it."""
+    source = """
+from typing import Annotated
+
+from .config import get_settings
+from .schemas import IvrWebhookInbound
+
+
+class IvrService:
+    def __init__(self, settings=None):
+        self.settings = settings or get_settings()
+
+    def handle_webhook(self, payload):
+        return self.settings.get_template_for_event(payload)
+
+
+def receive_ivr_webhook(
+    inbound: IvrWebhookInbound,
+    service: Annotated[IvrService, Depends(get_ivr_service)],
+):
+    payload = inbound.resolve()
+    return service.handle_webhook(payload)
+"""
+    result = _extract(tmp_path, "shop/webhook.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+
+    assert calls["inbound.resolve"]["resolution"] == "LOCAL_INSTANCE"
+    assert (
+        calls["inbound.resolve"]["resolved_qualified_name"]
+        == "shop.schemas.IvrWebhookInbound.resolve"
+    )
+
+    assert calls["service.handle_webhook"]["resolution"] == "LOCAL_INSTANCE"
+    assert (
+        calls["service.handle_webhook"]["resolved_qualified_name"]
+        == "shop.webhook.IvrService.handle_webhook"
+    )
+
+    assert calls["self.settings.get_template_for_event"]["resolution"] == "SELF_ATTRIBUTE"
+    assert (
+        calls["self.settings.get_template_for_event"]["resolved_qualified_name"]
+        == "shop.config.get_settings.get_template_for_event"
+    )
+
+
 def test_module_local_class_constructor_resolves_without_import(
     tmp_path: Path, system_id: str
 ) -> None:

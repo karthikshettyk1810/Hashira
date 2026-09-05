@@ -32,15 +32,61 @@ common way Python composes dependencies: assign a collaborator once in
 `__init__` alone, by the same restricted mechanism `LOCAL_INSTANCE` already
 uses for a local variable: `self.<attr> = KnownCallable(...)` or
 `self.<attr>: T = KnownCallable(...)`, where `KnownCallable` itself resolves
-to `IMPORT` or `MODULE_LOCAL` -- never a guess layered on a guess. A
-same-file `self._mcube = mcube_client or MCubeClient()` fallback-default
-idiom (a `BoolOp`, not a bare `Call`) deliberately still resolves to
-nothing, exactly like an unrelated `self.foo.bar()` does -- widening this
-to arbitrary attribute-flow analysis (assignments outside `__init__`,
-non-`Call` right-hand sides, multi-hop attribute provenance) is future
-work, not attempted here, for the same reason `RETURN_VALUE_PROVENANCE`
-stayed a disclosed limitation rather than a guess when this project last
-faced this choice.
+to `IMPORT` or `MODULE_LOCAL` -- never a guess layered on a guess.
+
+## Two further, equally bounded widenings the same pilot's next round required
+
+A second real-production investigation against the same repository
+(`docs/ROADMAP.md`'s continuation of that entry) found the fallback-default
+idiom this module's own docstring had just called out as deliberately
+unresolved -- `self._settings = settings or get_settings()` -- was in fact
+the *dominant* dependency-composition style in that codebase, breaking
+`SELF_ATTRIBUTE` resolution for exactly the production call it needed to
+prove existed. The same investigation separately found that an ordinary
+typed function parameter calling a method on itself (`def receive(inbound:
+IvrWebhookInbound, ...): inbound.resolve(...)`) -- arguably the single most
+common shape in any framework's request-handling code -- was never resolved
+at all, by anything, regardless of the fallback-default question.
+
+Both are now closed, each exactly as narrowly as `SELF_ATTRIBUTE` was:
+
+- **The fallback-default idiom** (`extractor.py`'s `_constructor_call`):
+  `provided or KnownCallable(...)` now resolves the same way a bare
+  `KnownCallable(...)` always did, for both `_local_instance_types` and
+  `_self_attribute_types` -- but *only* when the last operand of the `or`
+  chain is itself a literal call; a ternary, an `and`, or any other
+  expression shape still resolves to nothing, exactly as before. This
+  closes the case where `KnownCallable` is a class (`self._mcube =
+  mcube_client or MCubeClient()`, verified end-to-end against the pilot
+  repository). It does *not*, and mechanically cannot, close the sibling
+  case where the fallback is a plain factory *function* returning a known
+  type (`self._settings = settings or get_settings()`, also present in the
+  same repository) -- Stage 1 has no way to tell "imports a class" from
+  "imports a function that returns one" from an import statement alone,
+  and resolving a function's own return-type annotation is a cross-file
+  question this stage's own contract ("never touches another file") rules
+  out. This was true of a bare, non-fallback `self._settings =
+  get_settings()` before this fix existed too; the fix does not make it
+  worse, and `normalizer.py`'s Stage 2 still safely fails to promote such
+  a call rather than fabricate a wrong edge -- a miss, not a wrong answer.
+- **Typed parameters** (`extractor.py`'s `_parameter_instance_types`): a
+  parameter's own annotation (`Annotated[T, ...]` reduced to `T` first,
+  syntactically -- `_annotated_inner_type`) is resolved through the same
+  IMPORT/MODULE_LOCAL-only restriction as every other mechanism here, and
+  merged into `ResolutionContext.local_instance_types` alongside same-
+  function locals -- a parameter is, mechanically, just a name already
+  bound to a known type when the function starts. This is deliberately
+  separate from `adapters/sqlalchemy`'s own `_typed_parameter_instances`,
+  which exists only to detect ORM field reads/writes on a narrower set of
+  known model classes; this one feeds ordinary `CALLS` resolution for any
+  IMPORT/MODULE_LOCAL-resolvable type, model or not.
+
+Still deliberately not attempted, for the same reason as always -- a guess
+layered on a guess is not a stronger guess, it is a wrong answer with more
+confidence attached: multi-hop attribute provenance, `and`/ternary-composed
+fallbacks, assignments outside `__init__`, `*args`/`**kwargs`, and any
+attribute-flow analysis beyond "this one name has this one known type at
+this one point."
 """
 
 from __future__ import annotations

@@ -1135,6 +1135,66 @@ core rather than the adapter.
       bounded future work, not a blocker — the specific, evidence-backed gap
       this pass exists to close is closed.
 
+- [x] **Real Repository Pilot v0.1, Phase 2 continuation: two more
+      confirmed resolution gaps, closed the same way** — a follow-up
+      benchmark against the same, still-unmodified real repository ran
+      `reverse_impact` on a live, previously-buggy config value and got
+      back "no production callers, only tests": false, for two distinct,
+      independently-confirmed reasons, neither disclosed by any existing
+      `LimitationKind`. First, the exact fallback-default idiom
+      (`self._settings = settings or get_settings()`) the *previous* round
+      had just named as deliberately unresolved turned out to be this
+      codebase's dominant composition style, not a rare shape — it broke
+      `SELF_ATTRIBUTE` for the one call that mattered. Second, entirely
+      separate: an ordinary typed function parameter calling a method on
+      itself (`def receive(inbound: IvrWebhookInbound, service:
+      Annotated[IvrService, Depends(...)]): inbound.resolve(...)`) — the
+      single most common shape in any framework's request-handling code —
+      was never resolved by anything, regardless of the fallback question.
+      Together these explained the entire missing production call chain
+      the benchmark found. `docs/ADAPTERS.md`'s continuation of the same
+      entry has the full account.
+  - **Both closed, each exactly as narrowly-scoped as the fix before it**:
+      `extractor.py`'s `_constructor_call` now also accepts `provided or
+      KnownCallable(...)` (only when the `or` chain's last operand is a
+      literal call) for both `_local_instance_types` and
+      `_self_attribute_types`; a new `_parameter_instance_types` resolves
+      a parameter's own annotation (`Annotated[T, ...]` reduced to `T`
+      first) through the same IMPORT/MODULE_LOCAL-only restriction,
+      deliberately kept separate from `adapters/sqlalchemy`'s own
+      narrower, model-only `_typed_parameter_instances`. 12 new regression
+      tests; all pre-existing tests (including the full SQLAlchemy adapter
+      and FastAPI+SQLAlchemy integration suites) pass unchanged.
+  - **The acceptance criterion, again, was the real repository, not a new
+      fixture**: re-indexed, `CALLS` edges went 314 → 348 with zero new
+      duplicates and zero change to `WRITES`/`READS`/`CONTAINS` (confirming
+      no interaction with the untouched SQLAlchemy-specific mechanism).
+      Verified individually: `receive_ivr_webhook` now shows real `CALLS`
+      edges to `inbound.obd_skip_reason`, `inbound.resolve`, and
+      `service.handle_webhook` (Gap 2, fully closed); `NotificationService.
+      _send_sms`/`SmsService.send_and_log` now show real `CALLS` edges into
+      `MCubeClient.send_sms` via the exact `mcube_client or MCubeClient()`
+      idiom (Gap 1, closed for the class-constructor-fallback case it was
+      scoped to).
+  - **An honest, not-fully-clean result, caught during verification rather
+      than glossed over**: the literal example that motivated Gap 1's fix,
+      `self._settings = settings or get_settings()`, still does *not*
+      resolve after the fix — `get_settings` is a factory *function*
+      returning `Settings`, not a class, and Stage 1 cannot tell "imports a
+      class" from "imports a function that returns one" from an import
+      statement alone without reading the imported module (cross-file,
+      ruled out by this stage's own contract). This is not a regression --
+      a bare, non-fallback `self._settings = get_settings()` had the exact
+      same limitation before either fix existed — and it produces a miss,
+      not a wrong answer (`normalizer.py`'s Stage 2 still safely declines
+      to promote a call whose resolved name doesn't exist). Logged as a
+      newly-precise, currently-undisclosed boundary of the general Python
+      `CALLS` resolver (distinct from `RETURN_VALUE_PROVENANCE`, which
+      covers this same class/function ambiguity only for the SQLAlchemy
+      adapter's narrower field-access mechanism) — deliberately not acted
+      on this round; whether it earns its own `LimitationKind` is an open
+      question for whenever a real task next depends on the answer.
+
 ## Phase 5 — Runtime intelligence
 
 - [ ] CI integration, Sentry/observability integration.

@@ -162,6 +162,59 @@ bare `Call` (e.g. `self._mcube = mcube_client or MCubeClient()`'s
 fallback-default idiom still resolves to nothing, same as an unrelated
 `self.foo.bar()` always has).
 
+**Fixed one round later — the fallback-default idiom, and typed
+parameters calling a method on themselves.** A follow-up real-production
+benchmark (`docs/ROADMAP.md`'s continuation of the same entry) ran
+`reverse_impact` on a live, previously-buggy config value and got back
+"no production callers, only tests" — false, and for two distinct,
+verified reasons. First, the exact fallback-default idiom the paragraph
+above had just named as deliberately unresolved (`self._settings =
+settings or get_settings()`) turned out to be this codebase's dominant
+composition style, not a rare shape. Second, and unrelated to the first:
+an ordinary typed function parameter calling a method on itself
+(`def receive(inbound: IvrWebhookInbound, service: Annotated[IvrService,
+Depends(...)]): inbound.resolve(...)`) — arguably the single most common
+shape in any framework's request-handling code — was never resolved at
+all, by anything; no existing mechanism tracked a parameter's own
+annotation. Both closed, each as narrowly as `SELF_ATTRIBUTE` itself:
+`extractor.py`'s `_constructor_call` now also accepts `provided or
+KnownCallable(...)` (only when the last `or` operand is a literal call)
+for both `_local_instance_types` and `_self_attribute_types`; a new
+`_parameter_instance_types` resolves a parameter's own annotation
+(`Annotated[T, ...]` reduced to `T` first) through the same
+IMPORT/MODULE_LOCAL-only restriction, merged into
+`ResolutionContext.local_instance_types` — deliberately separate from
+`adapters/sqlalchemy`'s own `_typed_parameter_instances`, which exists
+only for ORM field reads/writes on known model classes, not general
+`CALLS` resolution.
+
+**A third, more fundamental boundary surfaced while verifying the fix,
+and deliberately left alone.** `self._mcube = mcube_client or
+MCubeClient()` now resolves correctly (`MCubeClient` is a class, so its
+own qualified name genuinely is `_mcube`'s type) — verified against the
+real repository: `NotificationService`/`SmsService` now show real `CALLS`
+edges into `MCubeClient.send_sms`. But the literal example that motivated
+the fix, `self._settings = settings or get_settings()`, does *not*
+resolve correctly even after this fix, because `get_settings` is a plain
+factory *function* returning a `Settings` instance, not a class named
+`get_settings` — Stage 1 has no way to tell "imports a class" from
+"imports a function that returns one" from an import statement alone, and
+resolving a function's own return-type annotation is a cross-file
+question this stage's "never touches another file" contract rules out.
+This is not a regression: a bare, non-fallback `self._settings =
+get_settings()` had exactly the same limitation before either fix
+existed, for the same reason `RETURN_VALUE_PROVENANCE` (the SQLAlchemy
+adapter's own, narrower, field-access-only version of this same class/
+function ambiguity) was disclosed rather than guessed at when this
+project last faced this choice. `normalizer.py`'s Stage 2 still safely
+declines to promote such a call into a relationship rather than fabricate
+one — a miss, not a wrong answer. **Not fixed, and not asked for**: no
+`LimitationKind` currently discloses this specific ambiguity for the
+general Python `CALLS` resolver (`RETURN_VALUE_PROVENANCE` as it exists
+today is scoped only to the SQLAlchemy adapter's field-access mechanism);
+whether it deserves one is a real, open question for a future round, not
+decided here.
+
 **What this adapter can offer on its own, and where Git now picks up the
 rest** — found by the adversarial identity suite rather than assumed up
 front: on its own, `QUALIFIED_NAME` and `DECLARATION_ANCHOR` (file +
