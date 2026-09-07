@@ -45,7 +45,13 @@ from ...core.base import SourceRef
 from ...core.enums import Origin
 from ...core.evidence import Evidence, Observation
 from ...core.ids import SystemID
-from ...ports.adapters import AdapterCapabilities, ExtractionResult
+from ...ports.adapters import (
+    AdapterCapabilities,
+    ExtractionResult,
+    Limitation,
+    LimitationKind,
+    LimitationScope,
+)
 from .._python_index import PythonIndex, PythonTreeCache, find_class_node
 from ..python.resolve import ResolutionContext, resolve_expr
 from .known_bases import MODEL_BASES, MODEL_FIELD_MODULE_PREFIX, VIEW_BASES
@@ -70,6 +76,24 @@ class DjangoAdapter:
             # No entity_types/relationship_types: like GitAdapter, this
             # produces Observations only -- normalizer.py builds the graph.
             requires_network=False,
+            known_limitations=[
+                Limitation(
+                    kind=LimitationKind.FRAMEWORK_REFLECTION,
+                    scope=LimitationScope.FRAMEWORK_SERIALIZATION,
+                    detail=(
+                        "A DRF serializer/admin/signal reading a mapped model "
+                        "attribute via Django's own reflection mechanisms "
+                        "(ModelSerializer field introspection, admin "
+                        "list_display, get_FOO_display(), signal receivers "
+                        "connected at runtime) rather than an explicit "
+                        "`.field` access in source is not represented as a "
+                        "READS/WRITES edge. Mirrors `FastAPIAdapter`'s own "
+                        "declaration for Pydantic's orm_mode -- the "
+                        "equivalent structural gap for Django's own "
+                        "reflection surface, previously undeclared entirely."
+                    ),
+                ),
+            ],
         )
 
     def detect(self, root: Path) -> bool:
@@ -187,7 +211,10 @@ class DjangoAdapter:
                 if tree is None:
                     continue
                 ctx = index.context_for(module_qn)
-                for access in _extract_field_accesses(tree, module_qn, ctx, fields_by_model):
+                accesses, unresolved_accesses = _extract_field_accesses(
+                    tree, module_qn, ctx, fields_by_model
+                )
+                for access in accesses:
                     access_kind = str(access["access_kind"])
                     result.observations.append(
                         _emit(
@@ -199,6 +226,22 @@ class DjangoAdapter:
                                 f"{access['accessor_qualified_name']} "
                                 f"{access_kind.lower()}s "
                                 f"{access['model_qualified_name']}.{access['field_name']}"
+                            ),
+                            file=file_rel,
+                            now=now,
+                        )
+                    )
+                for unresolved in unresolved_accesses:
+                    result.observations.append(
+                        _emit(
+                            result,
+                            system_id=system_id,
+                            kind="django.unresolved_field_access",
+                            payload=unresolved,
+                            summary=(
+                                f"{unresolved['accessor_qualified_name']} "
+                                f"accesses {unresolved['attribute_name']} dynamically "
+                                f"({unresolved['limitation_kind']})"
                             ),
                             file=file_rel,
                             now=now,
@@ -345,20 +388,61 @@ def _local_model_instances(
     return types
 
 
+def _check_dynamic_attribute_call(
+    call: ast.Call,
+    func_qn: str,
+    known_field_names: set[str],
+    unresolved: list[dict[str, object]],
+) -> None:
+    """`getattr(x, "field")`/`setattr(x, "field", value)` naming a real
+    model field by a literal string -- flagged as `DYNAMIC_ATTRIBUTE_ACCESS`
+    regardless of whether `x`'s own type is separately resolvable. Ported
+    from `adapters/sqlalchemy/adapter.py`'s own, already-proven mechanism
+    (Resolution Integrity R3): Django's field-access extraction had no
+    getattr/setattr detection at all -- a real, undisclosed gap relative to
+    SQLAlchemy's own, more mature disclosure surface, not a hypothetical
+    one. A non-literal second argument (`getattr(x, field_name)`) names
+    nothing this adapter can check against a field list, so it is
+    correctly not flagged -- supporting that would mean guessing at a
+    runtime value, exactly what this adapter refuses to do."""
+    if len(call.args) < 2 or not isinstance(call.args[0], ast.Name):
+        return
+    name_arg = call.args[1]
+    if not (isinstance(name_arg, ast.Constant) and isinstance(name_arg.value, str)):
+        return
+    attribute_name = name_arg.value
+    if attribute_name not in known_field_names:
+        return
+    unresolved.append(
+        {
+            "accessor_qualified_name": func_qn,
+            "attribute_name": attribute_name,
+            "limitation_kind": LimitationKind.DYNAMIC_ATTRIBUTE_ACCESS.value,
+            "line": call.lineno,
+        }
+    )
+
+
 def _extract_field_accesses(
     tree: ast.Module,
     module_qn: str,
     ctx: ResolutionContext,
     fields_by_model: dict[str, dict[str, str]],
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Every `instance.field` read or write, for an `instance` whose type is
     a *local, direct* assignment to a known Django model
     (`payment = Payment(...)`). `self.attr` access to an instance attribute
     is not tracked in v0.1 — only local variables, mirroring
     `adapters.python.extractor`'s own `LOCAL_INSTANCE` scope. A field access
     through anything else (an attribute chain, a function parameter, a
-    dict/list element) stays unresolved rather than guessed at."""
+    dict/list element) stays unresolved rather than guessed at.
+
+    Also returns `getattr`/`setattr` calls naming a real field by a literal
+    string (`_check_dynamic_attribute_call`) as a second, `unresolved` list
+    -- disclosed, never resolved into a real access."""
     accesses: list[dict[str, object]] = []
+    unresolved: list[dict[str, object]] = []
+    known_field_names = {name for fields in fields_by_model.values() for name in fields}
 
     def collect(body: list[ast.stmt], func_qn: str, func_ctx: ResolutionContext) -> None:
         def walk(node: ast.AST) -> None:
@@ -383,6 +467,12 @@ def _extract_field_accesses(
                                     "line": child.lineno,
                                 }
                             )
+                elif isinstance(child, ast.Call):
+                    if isinstance(child.func, ast.Name) and child.func.id in (
+                        "getattr",
+                        "setattr",
+                    ):
+                        _check_dynamic_attribute_call(child, func_qn, known_field_names, unresolved)
                 if isinstance(
                     child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
                 ):
@@ -409,7 +499,7 @@ def _extract_field_accesses(
                 walk_body(stmt.body, func_qn)
 
     walk_body(tree.body, module_qn)
-    return accesses
+    return accesses, unresolved
 
 
 def _emit(

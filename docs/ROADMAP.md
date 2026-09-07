@@ -1534,6 +1534,110 @@ core rather than the adapter.
     than resolve), a second, differently-shaped real-repository benchmark,
     and either open gap pinned above.
 
+- [x] **Composition/seam audit** — prompted directly by the CLI regression
+      the R2 milestone found: if a whole adapter's Stage-2 normalizer can
+      go silently unwired for this long, what else might be? A narrow,
+      time-boxed audit of Hashira's own shipped indexing composition path
+      only (`cli/main.py` → `IndexingService` → adapters →
+      `compose_normalizers` → storage) — never the Rider benchmark itself.
+      Ten seams checked; nine wired correctly (confirmed, not assumed —
+      each adapter's extraction and Stage-2 normalizer traced by reading
+      both, cross-checked against `compose_normalizers`'s actual call).
+      One real, closeable gap found: **zero CLI-level regression coverage
+      existed for FastAPI/SQLAlchemy composition through the actual
+      `hashira index` entry point** — the exact blind spot that let the
+      Django omission ship. Closed with one new test
+      (`test_run_index_produces_fastapi_and_sqlalchemy_entities_and_relationships`),
+      reusing the existing, already-load-bearing `fastapi_checkout`
+      fixture through `_run_index` itself rather than a hand-constructed
+      `IndexingService`.
+  - **One risk logged, deliberately not fixed** (would be broad
+    error-handling work, explicitly out of this audit's scope):
+    `IndexingService.index()` has no `try`/`except` anywhere around any
+    adapter's `extract()`/`enrich()`/the injected `normalize()` call — the
+    adapter contract's own promise ("skip and record the error, never
+    abort the run") is enforced only by each adapter's *internal*
+    defensiveness (`extract_file`'s own `SyntaxError` handling), not by
+    any orchestration-level guard. The existing parse-error resilience
+    test only covers syntax-level failures; it cannot and does not catch
+    a validation-level exception deeper in Stage-2 entity minting — which
+    is exactly the shape both crashes fixed this week took. Not a new
+    finding invented for this audit — a naming of the risk class both of
+    those real crashes already demonstrated, left open rather than
+    papered over with a blanket `try`/`except` that would itself need its
+    own design pass (what counts as "one record," what gets logged, does
+    it retry) to do honestly.
+  - **No other bugs found.** Per the instruction not to manufacture a PR
+    when everything else checks out clean, nothing else was touched.
+
+- [x] **Hashira 0.2 — Resolution Integrity, R3: the dynamic/reflection
+      boundary** — deliberately smaller than R1/R2, and a genuine change
+      of question. Not "can Hashira resolve this" (the honest answer for
+      dynamic Python is almost always no, and should stay no) but "can
+      Hashira detect the pattern, identify the affected entity, and
+      disclose the boundary accurately — never letting an unresolved
+      access read as *no relationship at all*." Seven target patterns
+      (`getattr`/`setattr`, dynamic method lookup, string-based dispatch,
+      framework reflection, decorator-generated behavior, registry-based
+      dispatch) classified against both adapters with disclosure surfaces
+      (SQLAlchemy, Django) in
+      `tests/unit/test_dynamic_reflection_boundary_matrix.py` (9 rows).
+  - **Two real, distinct gaps closed, both pure detect-and-disclose, no
+    new resolution logic**:
+    1. Django's field-access extraction had **zero** `getattr`/`setattr`
+       detection at all — not even the coarse kind SQLAlchemy already
+       had. `adapters/django/adapter.py`'s new
+       `_check_dynamic_attribute_call` ports SQLAlchemy's own,
+       already-proven mechanism unchanged in spirit: a literal field name
+       is disclosed as `DYNAMIC_ATTRIBUTE_ACCESS` (a new
+       `django.unresolved_field_access` observation kind, automatically
+       picked up by `application/indexing.py`'s existing
+       `_extract_coverage_limitation_kinds`, which matches on the
+       `.unresolved_field_access` suffix generically — no change needed
+       there), a computed name stays correctly silent.
+    2. `DjangoAdapter.capabilities()` declared **no `known_limitations`
+       at all** — a Django project's own `coverage.limitations` never
+       mentioned framework reflection, unlike a FastAPI project's (which
+       correctly names Pydantic's `orm_mode`), even though Django's own
+       reflection surface (DRF `ModelSerializer` field introspection,
+       admin `list_display`, `get_FOO_display()`, signal receivers
+       connected at runtime) is at least as large. Fixed by declaring
+       `FRAMEWORK_REFLECTION` structurally, mirroring `FastAPIAdapter`'s
+       existing declaration exactly.
+  - **One real finding, deliberately left open, not fixed this pass**:
+    decorator-injected attributes (`@celery_task` then `task.delay(...)`
+    elsewhere — a real, live pattern in the read-only Rider benchmark's
+    own Celery usage) are *syntactically* a literal `obj.method(...)` call
+    the resolver reads directly, unlike `getattr(obj, computed)(...)` —
+    only the attribute a decorator injects at runtime is unknown. Currently
+    falls under the same blanket `DYNAMIC_DISPATCH` structural disclosure
+    as genuinely computed dispatch targets, which is not silent but is
+    imprecise (`DYNAMIC_DISPATCH`'s own docstring describes "a call whose
+    target is resolved at runtime," not "a call whose target resolves
+    fully except for one runtime-injected attribute"). `LimitationKind`'s
+    own stated growth policy — one real, adapter-reported case at a time,
+    never speculatively ahead of the evidence, every existing member
+    added only after independent rediscovery more than once — is not yet
+    cleared by this pass's single observation; logged so a future pass
+    with stronger evidence does not start from nothing.
+  - **Re-verified against the read-only real-repository benchmark, not
+    assumed safe from the synthetic matrix alone**: re-indexed cleanly (0
+    crashes, entity/relationship counts unchanged, as expected for a
+    disclosure-only change), Django's `FRAMEWORK_REFLECTION` limitation
+    now correctly appears in the snapshot's own diagnostics where it was
+    entirely absent before, and the new `getattr`/`setattr` detection
+    found **2 real, previously completely silent dynamic field accesses**
+    in Rider's own codebase (`accounts.services.geocoding.geocode_rider_from_manual_address`,
+    `tours.services.proof_photo_upload.infer_stop_photo_type`) — real
+    value, not synthetic.
+  - **Not attempted in this pass**: resolving any of the seven patterns
+    (explicitly not the goal), a new `LimitationKind` for
+    decorator-injected attributes (logged, not actioned), and porting
+    Django's field-access mechanism further to match SQLAlchemy's fuller
+    provenance-form coverage (typed parameter/return-value/self-attribute
+    widenings) — a separate, larger effort from this pass's narrow
+    detect-and-disclose scope.
+
 - [x] **PyPI distribution, 0.1.0a1 then 0.1.0a2** — the first time this
       project's own installability, not just its behavior against a real
       target repository, became the thing under test. `0.1.0a1`: version

@@ -480,6 +480,23 @@ access (only local-variable instances are tracked, matching the Python
 resolver's own scope limit), and resolving `include()`'d URL confs across
 files.
 
+**Resolution Integrity R3: the dynamic/reflection boundary.** Two real,
+previously-undisclosed gaps, both pure detect-and-disclose (no new
+resolution): this adapter's field-access extraction had *zero*
+`getattr`/`setattr` detection at all, unlike SQLAlchemy's own, already-proven
+mechanism (`_check_dynamic_attribute_call` ported here unchanged in
+spirit — a literal field name is disclosed as `DYNAMIC_ATTRIBUTE_ACCESS`,
+a computed one stays correctly silent); and `capabilities()` declared no
+`known_limitations` whatsoever — a Django project's own `coverage`
+never mentioned framework reflection at all, even though Django's own
+reflection surface (DRF serializer field introspection, admin
+`list_display`, `get_FOO_display()`, signal receivers) is at least as large
+as FastAPI's single declared case. Both fixed, mirroring FastAPI's own
+precedent exactly. `docs/ROADMAP.md`'s "Resolution Integrity R3" entry has
+the full account, including the real-repository verification: the new
+detection found 2 real, previously silent dynamic field accesses in the
+read-only benchmark's own codebase.
+
 ## FastAPI adapter
 
 `src/hashira/adapters/fastapi/` — a second `FrameworkAdapter`, built to

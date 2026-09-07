@@ -12,7 +12,7 @@ from hashira.adapters.django import DjangoAdapter
 from hashira.adapters.python import PythonAdapter
 from hashira.adapters.python.discovery import discover_python_files
 from hashira.core.ids import IDPrefix, new_id
-from hashira.ports.adapters import ExtractionResult
+from hashira.ports.adapters import ExtractionResult, LimitationKind
 
 
 @pytest.fixture
@@ -269,6 +269,68 @@ def test_field_access_on_an_unrelated_object_is_not_detected(
     base = _base(tmp_path, system_id)
     addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
     assert _by_kind(addition, "django.field_access") == []
+
+
+def test_getattr_with_a_literal_field_name_is_disclosed_not_resolved(
+    tmp_path: Path, system_id: str
+) -> None:
+    """Resolution Integrity R3: a real, previously-undisclosed gap --
+    Django's field-access extraction had no `getattr`/`setattr` detection
+    at all, unlike SQLAlchemy's own, already-proven mechanism. Ported here,
+    unchanged in spirit: a literal field name is disclosed as
+    `DYNAMIC_ATTRIBUTE_ACCESS`, never resolved into a real access."""
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from django.db import models\n\n\nclass Payment(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n",
+    )
+    _write(
+        tmp_path,
+        "payments/services.py",
+        "def process(payment):\n    return getattr(payment, 'status')\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    assert _by_kind(addition, "django.field_access") == []
+    unresolved = _by_kind(addition, "django.unresolved_field_access")
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["attribute_name"] == "status"
+    assert unresolved[0].payload["limitation_kind"] == "DYNAMIC_ATTRIBUTE_ACCESS"
+
+
+def test_getattr_with_a_computed_name_is_correctly_silent(tmp_path: Path, system_id: str) -> None:
+    """Not a false limitation: a computed name isn't a literal this
+    adapter can check against a field list at all -- mirrors SQLAlchemy's
+    own adversarial case for the identical mechanism."""
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from django.db import models\n\n\nclass Payment(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n",
+    )
+    _write(
+        tmp_path,
+        "payments/services.py",
+        "def process(payment, field_name):\n    return getattr(payment, field_name)\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    assert _by_kind(addition, "django.field_access") == []
+    assert _by_kind(addition, "django.unresolved_field_access") == []
+
+
+def test_capabilities_declare_framework_reflection() -> None:
+    """Resolution Integrity R3: `DjangoAdapter` declared zero
+    `known_limitations` at all before this -- Django users got no
+    reflection disclosure whatsoever, unlike `FastAPIAdapter`'s own
+    declaration for Pydantic's orm_mode. Mirrors it: DRF
+    serializers/admin/signals read mapped fields with no source-level
+    access for any adapter to see."""
+    limitations = DjangoAdapter().capabilities().known_limitations
+    assert any(lim.kind is LimitationKind.FRAMEWORK_REFLECTION for lim in limitations)
 
 
 def test_addition_does_not_echo_the_base_observations(tmp_path: Path, system_id: str) -> None:
