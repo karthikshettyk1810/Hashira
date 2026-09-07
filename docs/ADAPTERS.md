@@ -480,6 +480,54 @@ access (only local-variable instances are tracked, matching the Python
 resolver's own scope limit), and resolving `include()`'d URL confs across
 files.
 
+**Resolution Integrity R4: cross-adapter field impact.** Two real gaps
+found via the read-only Rider benchmark, not the synthetic matrix (which
+had no reason to exercise either — both patterns needed a real,
+multi-level real-world codebase to surface at all):
+
+1. **Abstract model inheritance was checked one level deep only.**
+   `enrich()` compared a class's *direct* base against `MODEL_BASES`/
+   `VIEW_BASES` verbatim — a project's own custom abstract base
+   (`class Tour(TimestampedModel)`, `TimestampedModel(UUIDModel)`,
+   `UUIDModel(models.Model)`) was invisible past one hop. This is exactly
+   the "abstract model inheritance chains" gap named above as "not
+   attempted" — its real-world severity was unknown until Rider's own
+   models turned out to almost entirely follow this idiom: **2 of 35+ real
+   domain models detected, before the fix.** `_expand_known_bases`
+   (`adapter.py`) is a plain fixpoint over `PythonIndex.inheritance` —
+   mirrors SQLAlchemy's own `_discover_declarative_bases`, minus the
+   re-parsing SQLAlchemy needs for its factory-declaration style, which
+   Django has no equivalent of. Verified against Rider: **33 models, 314
+   fields detected post-fix** (up from 2 and 15).
+2. **Field-access extraction had only one "typed object provenance" form**
+   (`_local_model_instances`: `x = Model()` local instantiation) — no typed
+   parameter, return-value, self-attribute, or constructor-keyword support,
+   unlike SQLAlchemy's now much fuller mechanism. Even after fix (1), real
+   fields like `tours.models.Tour.status` showed **zero** `reverse_impact`
+   paths despite confirmed real usage. Grepping Rider's own service layer
+   found typed parameters (`def _sum_planned(tour: Tour)`, `def
+   _party_phone(stop: Stop, ...)`) far more prevalent at the call sites
+   inspected than any other single provenance form, so
+   `_typed_parameter_model_instances` (a direct, unmodified port of
+   SQLAlchemy's own `_typed_parameter_instances`) is the one fix made this
+   pass — return-value-via-queryset (`Tour.objects.get(...)` has no
+   `-> Tour` annotation to read, unlike SQLAlchemy's explicit repository
+   return-type annotations), self-attribute, and constructor-keyword
+   support for Django remain open, matching how SQLAlchemy's own equivalent
+   forms were built incrementally rather than all at once. Verified against
+   Rider: `tours.models.Tour.status` went from 0 to **46 real, `CERTAIN`,
+   evidence-backed `reverse_impact` paths** (`common.master.services.
+   _reject_if_tour_started`, `tours.repositories.tour_repository.
+   TourRepository.start_tour`, and 44 more). Notably, the *specific* real
+   usages that first motivated this fix (`qr_token_service.py`,
+   `proximity_service.py`, `masked_call_service.py`) turned out on closer
+   inspection to be queryset-return-value (`Tour.objects.filter(...)
+   .first()`) and cross-attribute (`stop.tour.status`) patterns, not
+   typed-parameter — so those three files specifically remain open gaps
+   even after this fix; the 46 paths found come from other real call sites.
+   `docs/ROADMAP.md`'s "Resolution Integrity R4" entry has the full matrix
+   and golden-benchmark account.
+
 **Resolution Integrity R3: the dynamic/reflection boundary.** Two real,
 previously-undisclosed gaps, both pure detect-and-disclose (no new
 resolution): this adapter's field-access extraction had *zero*
@@ -739,6 +787,30 @@ severe bug the real-repository verification step (not the matrix) found:
 `cli/main.py`'s own `compose_normalizers` call never included Django's
 enricher at all, silently discarding every Django-specific relationship
 `hashira index` ever produced.
+
+**Resolution Integrity R4: cross-adapter field impact.** Building the
+end-to-end `reverse_impact`/`forward_impact` matrix
+(`tests/unit/test_impact_field_provenance_matrix.py`) — a genuinely
+cross-layer fixture (model → repository → constructor-composed service →
+Pydantic schema → FastAPI route) rather than one adapter's own
+fixtures — found the one real gap R2's `_self_attribute_class_instances`
+did not close: `self._repo.get(...)` (a constructor-injected repository
+returning a model instance) produced *neither* a resolved field access nor
+a disclosed/unresolved one — completely silent, the "worse than missing"
+failure mode this project's own disclosure philosophy exists to prevent.
+Root cause: `_return_value_instances`'s callee resolution only special-cased
+a bare `self`/`cls` `Name` node, never a `self.<attr>` `Attribute` callee.
+Fixed by consulting `ctx.self_attribute_types` directly when the callee is
+exactly that shape (the same `__init__`-derived evidentiary tier as R2's own
+fix, not a guess) — bare `self`/`cls` alone stays deliberately unresolved,
+since that really is circular and has no derivable type. Also introduced a
+small golden correctness benchmark
+(`tests/unit/test_golden_correctness_benchmark.py`): a hand-verified,
+exact-set expected-edges comparison (recall/precision, both 1.0 on this
+fixture) — internal engineering signal on whether "N paths found" means N
+*correct* paths, never a marketing claim. `docs/ROADMAP.md`'s "Resolution
+Integrity R4" entry has the full matrix, the golden-benchmark reasoning, and
+Django's own two real-repository gaps found and fixed in the same pass.
 
 ## Next adapter target (per the MVP scope decision in ARCHITECTURE.md)
 

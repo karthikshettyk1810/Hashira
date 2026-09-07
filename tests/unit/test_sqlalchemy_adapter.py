@@ -733,6 +733,63 @@ def test_self_method_return_value_is_flagged_not_resolved(tmp_path: Path, system
     assert unresolved[0].payload["limitation_kind"] == LimitationKind.RETURN_VALUE_PROVENANCE.value
 
 
+def test_return_value_through_a_self_attribute_receiver_resolves(
+    tmp_path: Path, system_id: str
+) -> None:
+    """The real gap Resolution Integrity R4's cross-layer verification
+    found: `self._repo.get(...)` -- a constructor-composed repository, the
+    single most common dependency-injection idiom -- fell through every
+    case in `_return_value_instances` silently (neither resolved nor
+    disclosed), because only a *bare* `self.method()` callee was
+    recognized, never a `self.<attr>.method()` one. Unlike bare
+    `self`/`cls` (deliberately never resolved -- its own class is
+    circular, not a derived fact), `self._repo`'s type comes from a real
+    `__init__` assignment, exactly the same evidentiary tier as a local
+    instance's or typed parameter's -- so this is resolved, not merely
+    disclosed."""
+    _write(tmp_path, "payments/__init__.py", "")
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from sqlalchemy import Column, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n\n'
+        "    status = Column(String(20))\n",
+    )
+    _write(
+        tmp_path,
+        "payments/repository.py",
+        "from .models import Payment\n\n\n"
+        "class PaymentRepository:\n"
+        "    def get(self, payment_id) -> Payment:\n"
+        "        return Payment()\n",
+    )
+    _write(
+        tmp_path,
+        "payments/service.py",
+        "from .repository import PaymentRepository\n\n\n"
+        "class PaymentService:\n"
+        "    def __init__(self):\n"
+        "        self._repo = PaymentRepository()\n\n"
+        "    def close(self, payment_id):\n"
+        "        payment = self._repo.get(payment_id)\n"
+        '        payment.status = "closed"\n'
+        "        return payment.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = SQLAlchemyAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    accesses = _by_kind(addition, "sqlalchemy.field_access")
+    kinds = {a.payload["access_kind"] for a in accesses}
+    assert kinds == {"READ", "WRITE"}
+    assert all(
+        a.payload["accessor_qualified_name"] == "payments.service.PaymentService.close"
+        for a in accesses
+    )
+    assert _by_kind(addition, "sqlalchemy.unresolved_field_access") == []
+
+
 def test_chained_return_value_is_flagged_not_resolved(tmp_path: Path, system_id: str) -> None:
     """`b = a.other()` where `a` is itself return-value-sourced -- one hop
     further than `_return_value_instances` follows, but recognizable

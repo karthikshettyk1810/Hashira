@@ -112,11 +112,26 @@ class DjangoAdapter:
         index = PythonIndex.build(base)
         result = ExtractionResult()
 
+        # `MODEL_BASES`/`VIEW_BASES` expanded to a fixpoint over each
+        # class's own *resolved* base -- a real-repository finding: a
+        # project's own multi-level custom abstract base (`class
+        # TimestampedModel(UUIDModel)`, `class UUIDModel(models.Model)`,
+        # then every real domain model extending `TimestampedModel`) was
+        # previously invisible entirely, since only a class's *direct*
+        # base was ever checked against the literal seed set. Simpler than
+        # `adapters/sqlalchemy/adapter.py`'s own fixpoint (`known_bases`):
+        # Django has no equivalent of the factory-declaration style that
+        # needs re-parsing class bodies, so a single pass over
+        # `index.inheritance` -- Python's own observations, already
+        # correctly resolved -- is sufficient.
+        known_model_bases = _expand_known_bases(index, MODEL_BASES)
+        known_view_bases = _expand_known_bases(index, VIEW_BASES)
+
         detected_models: dict[str, str] = {}  # class_qn -> module_qn
         detected_views: dict[str, str] = {}  # class_qn -> module_qn
         for class_qn, module_qn in index.class_module.items():
             for base_qn in index.inheritance.get(class_qn, ()):
-                if base_qn in MODEL_BASES:
+                if base_qn in known_model_bases:
                     detected_models[class_qn] = module_qn
                     result.observations.append(
                         _emit(
@@ -132,7 +147,7 @@ class DjangoAdapter:
                             now=now,
                         )
                     )
-                elif base_qn in VIEW_BASES:
+                elif base_qn in known_view_bases:
                     detected_views[class_qn] = module_qn
                     result.observations.append(
                         _emit(
@@ -249,6 +264,34 @@ class DjangoAdapter:
                     )
 
         return result
+
+
+def _expand_known_bases(index: PythonIndex, seed: frozenset[str]) -> set[str]:
+    """`seed` (`MODEL_BASES`/`VIEW_BASES`) expanded to a fixpoint over every
+    class's own resolved base -- a real-repository finding: a project's own
+    multi-level custom abstract base (`class TimestampedModel(UUIDModel)`,
+    `class UUIDModel(models.Model)`, then every real domain model extending
+    `TimestampedModel`) was previously invisible entirely, since only a
+    class's *direct* base was ever checked against the literal seed set --
+    silently missing the majority of a real Django app's own models (a
+    project's own shared abstract base is idiomatic, not a rare shape).
+    Mirrors `adapters/sqlalchemy/adapter.py`'s own `known_bases` fixpoint,
+    simplified: Django has no equivalent of the factory-declaration style
+    (`Base = declarative_base()`) that needs re-parsing class bodies to see
+    past a locally-assigned variable, so a single pass over
+    `index.inheritance` -- Python's own observations, already correctly
+    resolved for ordinary class-based inheritance -- is sufficient here."""
+    known = set(seed)
+    changed = True
+    while changed:
+        changed = False
+        for class_qn, bases in index.inheritance.items():
+            if class_qn in known:
+                continue
+            if any(base in known for base in bases):
+                known.add(class_qn)
+                changed = True
+    return known
 
 
 def _extract_model_fields(
@@ -388,6 +431,32 @@ def _local_model_instances(
     return types
 
 
+def _typed_parameter_model_instances(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ctx: ResolutionContext,
+    fields_by_model: dict[str, dict[str, str]],
+) -> dict[str, str]:
+    """A parameter's own type annotation (`def f(tour: Tour)`), resolved
+    only against known Django models -- the second "typed object
+    provenance" form (`_local_model_instances` above is the first),
+    ported unchanged in spirit from `adapters/sqlalchemy/adapter.py`'s own
+    `_typed_parameter_instances`. A real, high-prevalence gap this
+    milestone's own real-repository verification found: a typed parameter
+    is arguably *the* most common way a Django service function receives a
+    model instance at all (a view or caller already looked it up), and
+    was completely invisible to field-access tracking before this -- not
+    a rare shape needing a narrower fix, but the dominant one."""
+    types: dict[str, str] = {}
+    params = [*func_node.args.posonlyargs, *func_node.args.args, *func_node.args.kwonlyargs]
+    for param in params:
+        if param.annotation is None:
+            continue
+        resolved = resolve_expr(param.annotation, ctx)
+        if resolved.qualified_name in fields_by_model:
+            types[param.arg] = resolved.qualified_name
+    return types
+
+
 def _check_dynamic_attribute_call(
     call: ast.Call,
     func_qn: str,
@@ -488,12 +557,13 @@ def _extract_field_accesses(
                 walk_body(stmt.body, f"{qualified_name}.{stmt.name}")
             elif isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
                 func_qn = f"{qualified_name}.{stmt.name}"
+                param_types = _typed_parameter_model_instances(stmt, ctx, fields_by_model)
                 local_types = _local_model_instances(stmt, ctx, fields_by_model)
                 func_ctx = ResolutionContext(
                     module_qualified_name=ctx.module_qualified_name,
                     imports=ctx.imports,
                     module_locals=ctx.module_locals,
-                    local_instance_types=local_types,
+                    local_instance_types={**param_types, **local_types},
                 )
                 collect(stmt.body, func_qn, func_ctx)
                 walk_body(stmt.body, func_qn)

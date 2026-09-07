@@ -950,7 +950,29 @@ def _return_value_instances(
             call_derived_names.add(target.id)
             return
 
-        callee_qn = resolve_expr(callee_expr, ctx).qualified_name
+        # `self.<attr>.method()` -- a constructor-composed dependency's own
+        # method call (`self._repo.get(...)`) -- resolved through
+        # `self_attribute_types` directly, a real gap R4's own cross-layer
+        # verification found: `resolve_expr` itself only ever promotes a
+        # `self.<x>.<y>` chain to `SELF_ATTRIBUTE` when resolving the
+        # *whole* chain as one target (a call, e.g.), never when resolving
+        # `self.<attr>` alone as a callee's own base (one hop short of
+        # that) -- so this fell through every case below silently.
+        # `self._repo`'s type is exactly as well-evidenced as a local
+        # instance's or typed parameter's (a real `__init__` assignment,
+        # not a guess), so -- unlike the deliberately-never-resolved bare
+        # `self`/`cls` case just above, whose own class is circular rather
+        # than a derived fact -- this is resolved the same way any other
+        # known-type callee already is, not merely disclosed.
+        if (
+            isinstance(callee_expr, ast.Attribute)
+            and isinstance(callee_expr.value, ast.Name)
+            and callee_expr.value.id == "self"
+            and callee_expr.attr in ctx.self_attribute_types
+        ):
+            callee_qn: str | None = ctx.self_attribute_types[callee_expr.attr]
+        else:
+            callee_qn = resolve_expr(callee_expr, ctx).qualified_name
         if callee_qn is not None and callee_qn in index.class_module:
             return_qn = _method_return_type(
                 callee_qn,

@@ -90,6 +90,56 @@ def test_class_extending_an_unrelated_base_named_model_is_not_detected(
     assert _by_kind(addition, "django.model") == []
 
 
+def test_model_detected_through_a_multi_level_custom_abstract_base(
+    tmp_path: Path, system_id: str
+) -> None:
+    """The real gap: a project's own multi-level custom abstract base
+    (`TimestampedModel(UUIDModel)`, `UUIDModel(models.Model)`) was
+    previously invisible entirely -- only a class's *direct* base was ever
+    checked against `MODEL_BASES`, silently missing every real domain
+    model in a real Django app that follows this idiomatic pattern
+    (found via the read-only Rider benchmark: 15+ real models, none
+    detected). `_expand_known_bases` mirrors SQLAlchemy's own
+    `known_bases` fixpoint."""
+    _write(
+        tmp_path,
+        "common/models.py",
+        "from django.db import models\n\n\n"
+        "class UUIDModel(models.Model):\n"
+        "    class Meta:\n        abstract = True\n\n\n"
+        "class TimestampedModel(UUIDModel):\n"
+        "    class Meta:\n        abstract = True\n",
+    )
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from common.models import TimestampedModel\n\n\nclass Tour(TimestampedModel):\n    pass\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    models = {m.payload["class_qualified_name"] for m in _by_kind(addition, "django.model")}
+    assert "tours.models.Tour" in models
+
+
+def test_unrelated_class_extending_a_detected_custom_base_by_coincidence_still_needs_evidence(
+    tmp_path: Path, system_id: str
+) -> None:
+    """The fixpoint must still refuse a class whose base is *not* actually
+    in the (correctly expanded) known set -- expanding the base set must
+    not become a license to guess."""
+    _write(
+        tmp_path,
+        "common/models.py",
+        "from django.db import models\n\n\nclass UUIDModel(models.Model):\n    pass\n",
+    )
+    _write(tmp_path, "shop/things.py", "class Unrelated:\n    pass\n")
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    models = {m.payload["class_qualified_name"] for m in _by_kind(addition, "django.model")}
+    assert "shop.things.Unrelated" not in models
+
+
 # --- view detection ----------------------------------------------------------
 
 
@@ -269,6 +319,40 @@ def test_field_access_on_an_unrelated_object_is_not_detected(
     base = _base(tmp_path, system_id)
     addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
     assert _by_kind(addition, "django.field_access") == []
+
+
+def test_field_read_and_write_through_a_typed_parameter_are_detected(
+    tmp_path: Path, system_id: str
+) -> None:
+    """Real-repository verification (Rider): a typed parameter
+    (`def process(payment: Payment)`) is arguably *the* most common way a
+    Django service function receives a model instance at all -- a view or
+    caller already looked it up -- yet was completely invisible to
+    field-access tracking before `_typed_parameter_model_instances`. This
+    is a direct, exact port of the analogous, already-proven SQLAlchemy
+    mechanism (`_typed_parameter_instances`)."""
+    _write(
+        tmp_path,
+        "payments/models.py",
+        "from django.db import models\n\n\nclass Payment(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n",
+    )
+    _write(
+        tmp_path,
+        "payments/services.py",
+        "from .models import Payment\n\n\n"
+        "def close(payment: Payment) -> str:\n"
+        '    payment.status = "closed"\n'
+        "    return payment.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    accesses = _by_kind(addition, "django.field_access")
+    kinds = {a.payload["access_kind"] for a in accesses}
+    assert kinds == {"READ", "WRITE"}
+    assert all(a.payload["field_name"] == "status" for a in accesses)
+    assert all(a.payload["accessor_qualified_name"] == "payments.services.close" for a in accesses)
 
 
 def test_getattr_with_a_literal_field_name_is_disclosed_not_resolved(

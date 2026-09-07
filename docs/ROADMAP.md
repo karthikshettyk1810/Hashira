@@ -1691,6 +1691,111 @@ core rather than the adapter.
       dependency); any change to indexing/resolution/impact behavior
       itself — this was a distribution-only milestone, twice.
 
+- [x] **Hashira 0.2 — Resolution Integrity, R4: cross-adapter data/field
+      impact** — a change of question from R1–R3: not "can Hashira resolve
+      import X" or "can Hashira detect dynamic dispatch Y" but "can Hashira
+      correctly answer *what changes if this data field changes?* across
+      the whole application, not only within one data adapter." Built a
+      ~20-row cross-layer matrix
+      (`tests/unit/test_impact_field_provenance_matrix.py`) covering
+      READS/WRITES provenance for ORM fields across constructor/typed-
+      parameter/repository-return-value/self-attribute/constructor-keyword
+      forms, exercised through two real flow shapes — DB field → ORM model
+      → repository → constructor-composed service → Pydantic response
+      schema → FastAPI route, and the negative-conflation cases a same-
+      named-but-unrelated field must not trigger — all using
+      `IMPACT_EDGES`' *existing* vocabulary (`CALLS`/`READS`/`WRITES`/
+      `MAPS_TO`/`REFERENCES`/`EXPOSES`); no new relationship type was
+      introduced, because none of the observed facts needed one. Also
+      added a small golden correctness benchmark
+      (`tests/unit/test_golden_correctness_benchmark.py`): ten hand-verified
+      expected edges compared exactly against Hashira's own output
+      (recall = precision = 1.0 on this fixture) — an internal signal, not
+      a marketing number, on whether "Hashira found N paths" means N
+      *correct* paths.
+  - **One real SQLAlchemy gap closed**: `self._repo.get(...)` (a
+    constructor-injected repository returning a model instance — an
+    extremely common DI shape) produced *no* field-access observation at
+    all, resolved or disclosed — the worst failure mode, silence.
+    `_return_value_instances`'s callee resolution only ever special-cased a
+    bare `self`/`cls` `Name` callee; a `self.<attr>` `Attribute` callee fell
+    through untouched. Fixed by resolving that specific shape through
+    `ctx.self_attribute_types` directly (the same `__init__`-derived
+    evidentiary tier R2's own self-attribute fix already established, not a
+    new guess) — bare `self`/`cls` alone is still deliberately never
+    resolved, since it is genuinely circular. Verified: the matrix's
+    self-attribute-repository row went from silently absent to a real,
+    resolved `sqlalchemy.field_access` pair (all 15 matrix rows now pass,
+    up from 11).
+  - **Two real Django gaps found via the read-only Rider benchmark itself**,
+    not the synthetic matrix — the same "synthetic tests find language
+    defects, real repositories find composition/ecosystem defects" pattern
+    R1–R3 already established, now repeating on a third distinct axis:
+    1. Abstract model inheritance was checked one hop deep only
+       (`base_qn in MODEL_BASES` on a class's *direct* base) — Rider's own
+       models almost entirely extend a multi-level custom abstract chain
+       (`Tour(TimestampedModel)` → `TimestampedModel(UUIDModel)` →
+       `UUIDModel(models.Model)`), leaving **2 of 35+ real domain models
+       detected**. `_expand_known_bases` (a plain fixpoint over
+       `PythonIndex.inheritance`, mirroring SQLAlchemy's own
+       `_discover_declarative_bases` minus its factory-style re-parsing,
+       which Django doesn't need) fixed it: **33 models, 314 fields
+       detected post-fix** (verified by re-indexing Rider end to end).
+    2. Even with (1) fixed, field-access extraction had only one typed-
+       object-provenance form (`_local_model_instances`) — no typed
+       parameter, return-value, self-attribute, or constructor-keyword
+       support, unlike SQLAlchemy's now-fuller mechanism. A concretely
+       chosen real field, `tours.models.Tour.status` (confirmed real usage
+       via `grep` across Rider's own service layer, not an artificially
+       picked example), showed **zero** `reverse_impact` paths despite
+       that usage. Given the time budget, only the single highest-leverage
+       form was ported: `_typed_parameter_model_instances`, an unmodified
+       port of SQLAlchemy's own proven `_typed_parameter_instances` — typed
+       parameters (`def _sum_planned(tour: Tour)`) were the most prevalent
+       single provenance shape at the real call sites inspected. Verified
+       by re-indexing Rider end to end: `Tour.status`'s `reverse_impact`
+       went from 0 to **46 real, `CERTAIN`, evidence-backed paths**
+       (`common.master.services._reject_if_tour_started`,
+       `tours.repositories.tour_repository.TourRepository.start_tour`, and
+       44 more real accessors). One honest correction made during this
+       same verification: the *specific* usages that first motivated
+       picking this field (`qr_token_service.py`, `proximity_service.py`,
+       `masked_call_service.py`) turned out, on inspection, to be
+       queryset-return-value (`Tour.objects.filter(...).first()`) and
+       cross-attribute (`stop.tour.status`) patterns — not typed-parameter
+       — so those three files specifically remain unresolved even after
+       this fix; the 46 real paths found come from other call sites in the
+       same codebase. Return-value-via-queryset (no `-> Tour` annotation to
+       read, unlike SQLAlchemy's explicit repository return types),
+       self-attribute, and constructor-keyword support for Django are
+       logged as open, deliberately deferred gaps — matching how
+       SQLAlchemy's own equivalent forms were built incrementally across
+       several milestones rather than all at once.
+  - **Classified per the requested discrepancy taxonomy**: both Django
+    findings are FALSE NEGATIVE (real relationships present in the
+    codebase, absent from the graph) rather than wrong-entity/wrong-
+    relationship/wrong-confidence — the graph never asserted anything
+    false, it simply had less coverage than the real code. The SQLAlchemy
+    finding is MISSING PROVENANCE that manifested as a FALSE NEGATIVE (no
+    disclosure either) rather than a MISSING DISCLOSURE, since the derived
+    fact (`self._repo`'s type) was recoverable with existing evidence and
+    the right fix was to resolve it, not merely to disclose the gap.
+  - **Not attempted this pass**: any new `RelationshipType` (the existing
+    vocabulary was checked first and found sufficient throughout, per this
+    milestone's own explicit instruction), interprocedural dataflow of any
+    kind (SSA/CFG/symbolic execution/whole-program type inference/arbitrary
+    value tracking — deliberately out of scope, as bounded provenance +
+    explicit uncertainty + evidence was always the target, not general
+    dataflow analysis), Django return-value/self-attribute/constructor-
+    keyword field-access forms (logged above, not actioned), and expanding
+    the golden benchmark beyond its current one fixture (a natural next
+    step, not this pass's).
+  - **Full verification suite green throughout**: pytest (full suite),
+    mypy strict, Ruff (check + format) all clean; Rider's own git status
+    confirmed clean (only the generated `.hashira/` artifact untracked)
+    both before and after re-indexing, per this project's standing
+    read-only constraint on the benchmark repository.
+
 ## Phase 5 — Runtime intelligence
 
 - [ ] CI integration, Sentry/observability integration.
