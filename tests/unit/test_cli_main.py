@@ -13,6 +13,7 @@ thin."""
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -250,6 +251,44 @@ def test_run_index_produces_django_specific_entities_and_relationships(
             types=[RelationshipType.WRITES],
         )
         assert len(writes) == 1
+
+
+def test_run_index_produces_fastapi_and_sqlalchemy_entities_and_relationships(
+    tmp_path: Path,
+) -> None:
+    """The seam audit's own instruction: one test exercising the actual
+    shipped `hashira index` composition for the two remaining
+    observation-producing adapters the Django regression's own fix did not
+    touch. Reuses the real, already-load-bearing `fastapi_checkout` fixture
+    (`tests/integration/test_fastapi_sqlalchemy_together.py`'s own fixture)
+    rather than a fresh inline one, run through `_run_index` itself -- if a
+    future change ever drops `enrich_fastapi`/`enrich_sqlalchemy` from
+    `compose_normalizers` the way `enrich_django` was dropped, this fails
+    the same way the Django regression test now would."""
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "fastapi_checkout"
+    project = tmp_path / "checkout"
+    shutil.copytree(fixture, project)
+    _git(project, "init", "-q")
+    _git(project, "config", "user.email", "test@example.com")
+    _git(project, "config", "user.name", "Test")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-q", "-m", "initial commit")
+
+    exit_code = _run_index(_index_args([str(project)]))
+    assert exit_code == 0
+
+    db_path = project / ".hashira" / "hashira.db"
+    db = SqliteDatabase(str(db_path))
+    with db.unit_of_work() as uow:
+        system = uow.systems.get_by_slug("checkout")
+        assert system is not None
+        entities = {e.qualified_name: e for e in uow.graph.find_entities(system.id, limit=200)}
+
+        model = entities["payments.db_models.Payment"]
+        assert model.metadata.get("sqlalchemy_kind") == "model"
+
+        handler = entities["payments.routers.checkout"]
+        assert handler.metadata.get("fastapi_kind") == "route_handler"
 
 
 def test_run_index_reports_a_clean_error_for_a_missing_project_root(
