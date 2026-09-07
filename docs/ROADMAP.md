@@ -1195,6 +1195,59 @@ core rather than the adapter.
       on this round; whether it earns its own `LimitationKind` is an open
       question for whenever a real task next depends on the answer.
 
+- [x] **PyPI distribution, 0.1.0a1 then 0.1.0a2** — the first time this
+      project's own installability, not just its behavior against a real
+      target repository, became the thing under test. `0.1.0a1`: version
+      bumped off `0.1.0.dev0` (a dev release pip won't install by default
+      once a less-pre-release version could be preferred), `[tool.hatch.
+      version]` single-sourced from `src/hashira/__init__.py` instead of
+      two hand-kept-in-sync strings, `authors`/a `License` classifier/a
+      real `LICENSE` file added (none existed despite `pyproject.toml`
+      already declaring `license = "Apache-2.0"`), the `hashira` name
+      confirmed unclaimed on PyPI/TestPyPI via the PEP 503 simple index
+      (the HTML project page returns a misleading 200 for a bot-detection
+      challenge, not proof of non-existence). README rewritten end to
+      end — the previous version still said "contracts only... no indexer
+      and no CLI yet," false and actively misleading as the text PyPI
+      would show. One real first-run bug found and fixed while smoke-
+      testing a clean install: `hashira mcp` without the `[mcp]` extra
+      surfaced a raw `ModuleNotFoundError` traceback instead of an
+      actionable `pip install "hashira[mcp]"` message.
+  - **`0.1.0a2`: `hashira index`**, closing the gap `0.1.0a1`'s own release
+      testing surfaced — a colleague could `pip install` the package and
+      still had no way to build a database without reading
+      `application/indexing.py` and writing a script by hand, exactly as
+      every one of this project's own real-repository validation rounds
+      had done. `_run_index` (`cli/main.py`) is composition only: the same
+      `IndexingService` + adapter wiring every scratch script already
+      used, turned into `hashira index ./my-project`. Deliberately no
+      "which framework does this project use" selection system — every
+      adapter (Python, Django, FastAPI, SQLAlchemy, Git) is always
+      offered the chance to look, since each already only produces
+      entities for constructs it actually recognizes. Root handling stays
+      transparent rather than guessing: an explicit root (default `.`),
+      with a stderr note (not a silent guess, not a hard error) when the
+      given root differs from the Git repository root it's inside — the
+      same monorepo/import-root finding from the real-repository pilot,
+      now surfaced by the CLI itself instead of only living in
+      `docs/ADAPTERS.md`. Idempotent by construction: an existing system
+      is looked up by slug and reused, never re-minted, which is what
+      keeps identity resolution working across repeat indexing runs.
+      Verified end to end from a fresh venv, wheel-only install, against
+      a real external fixture repository: `hashira index` then
+      `hashira mcp` then real MCP protocol calls, nothing imported from
+      the source checkout. 15 new regression tests; `0.1.0a1`'s own tests
+      and validation all still pass unchanged.
+  - **Explicitly not attempted in either release**: automatic import-root
+      detection (same restraint as the original finding — one pilot
+      repository's monorepo shape isn't enough evidence to generalize a
+      heuristic from); a `--version` CLI flag (not asked for; the version
+      is already consistently readable via `import hashira;
+      hashira.__version__`); Typer (`docs/ARCHITECTURE.md`'s own stated
+      future direction, not adopted here to avoid an unrelated new
+      dependency); any change to indexing/resolution/impact behavior
+      itself — this was a distribution-only milestone, twice.
+
 ## Phase 5 — Runtime intelligence
 
 - [ ] CI integration, Sentry/observability integration.
