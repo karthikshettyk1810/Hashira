@@ -1344,6 +1344,88 @@ core rather than the adapter.
       correctly still disclosed — none of these three fixes touch what
       those limitations describe.
 
+- [x] **Hashira 0.2 — Resolution Integrity, R1: the import/call resolver
+      gap corpus, and import re-export chains** — a deliberate shift in
+      method, not just another fix. The three-bug verification pass above
+      produced a stronger update than any single bug did: one real query
+      (`reverse_impact` on `KafkaEventPublisher.push_notification`) went
+      0 → 131 paths *and* surfaced a crash and two independent resolver
+      gaps neither synthetic fixtures nor unit tests in isolation had
+      caught. The corrected development loop this milestone commits to,
+      permanently, not just for this pass: synthetic resolver matrix ↔ a
+      read-only real-repository benchmark, in a tight loop, fixing only
+      Hashira — the benchmark repository is never modified, treated as an
+      adversarial laboratory, not a target for feature work.
+  - **The corpus**: `tests/unit/test_python_import_resolution_matrix.py`
+    (19 rows) and `tests/unit/test_python_call_resolution_matrix.py` (13
+    rows), structured the way `test_sqlalchemy_coverage_matrix.py` already
+    proved out for field-access coverage — a table docstring as the
+    reviewable audit surface, each row a real test against the whole-run
+    graph `normalizer.normalize` produces, not a mechanism tested in
+    isolation. Every import shape and call shape found across this
+    project's real-repository pilots to date has a permanent row here,
+    including the three real bugs from the immediately preceding
+    milestone (function-local imports, module-level singleton instances,
+    the `__init__.py` relative-import anchor) — a regression in any of
+    them now fails a named, greppable test, not just an assertion buried
+    in a feature-specific file. One row is deliberately marked as a real,
+    still-open gap rather than closed: a return value's own method call
+    (`x = repo.get(); x.method()`) is `SUPPORTED` only for SQLAlchemy's own
+    narrower field-access mechanism, not the general Python `CALLS`
+    resolver — pinned here so a future widening is a deliberate change to
+    this file, not a silent drift.
+  - **A fourth real bug, found building the corpus, not the benchmark**:
+    writing the re-export row (`pkg/__init__.py` doing `from pkg.sub import
+    Thing`, then `consumer.py` doing `from pkg import Thing`) surfaced that
+    Stage 1's own literal resolution of `consumer.py`'s import target
+    (`pkg.Thing`) never matches a real entity, since `pkg.Thing` is not
+    where `Thing` is actually defined — Stage 1 never chases another
+    file's own import statement, by design (§10's "never touches another
+    file"). This is the module-scoped twin of the singleton-instance gap
+    the immediately preceding milestone closed, generalized: both are
+    cases where a name Stage 1 resolved against its own literal import
+    target needs one more hop, resolvable only with the whole-run
+    visibility Stage 2 has and Stage 1 deliberately does not.
+  - **Closed by generalizing, not duplicating, the singleton-instance
+    mechanism.** `normalizer.py`'s `_retarget_through_module_instance`
+    (one-shot, module-instances only) became `_resolve_through_aliases`
+    (bounded, iterative, checking `by_qualified_name` after each
+    substitution) over a merged `alias_targets` map combining every
+    `python.module_instance` observation *and* every `python.import`
+    observation's own `importer.bound_name -> target` binding. Neither
+    kind is a guess: `from a import b` genuinely makes `a.b` the same
+    object as wherever `b` really lives, and `x = Cls()` genuinely makes
+    `x` an instance of `Cls` — both are deterministic facts about Python's
+    own binding semantics that this run's own observations already
+    recorded, never fabricated. Applied uniformly to all three lookup
+    sites that do an exact qualified-name match (`CALLS`, `IMPORTS`,
+    `EXTENDS`), not just the one that motivated it — a chained re-export
+    (two hops: `a/__init__.py` → `b/__init__.py` → `consumer.py`) resolves
+    correctly, bounded at 5 hops so a pathological or circular chain
+    terminates rather than looping. Two new corpus rows
+    (`test_supported__re_export_through_a_package_init`,
+    `test_supported__chained_re_export_two_hops`) plus the existing
+    singleton-instance tests, unmodified, still pass through the
+    generalized path.
+  - **Re-verified against the read-only real-repository benchmark, not
+    assumed safe from the synthetic corpus alone**: re-indexed cleanly (0
+    crashes, 2529 entities, 5498 relationships — up from 5464 after the
+    function-local-import/singleton-instance fixes alone, from real
+    re-export patterns this codebase's own Django apps use), and
+    `reverse_impact` on `KafkaEventPublisher.push_notification` went
+    131 → 167 paths on the exact same query, with `coverage.status`
+    staying honestly `PARTIAL`. The benchmark repository itself was not
+    modified in any way, per this milestone's own stated discipline.
+  - **Not attempted in this pass**: R2 (deeper call-resolution widenings
+    beyond what the corpus already pins as open, e.g. return-value
+    provenance for the general resolver), R3 (instance/attribute
+    provenance as its own tracked concept, named as the next likely
+    source of hidden false negatives), R4 (attribute/field provenance
+    outside SQLAlchemy), a second, differently-shaped real-repository
+    benchmark alongside this one, and a class-body-level import binding
+    (still only observed for `IMPORTS`, not resolved for `CALLS` — same
+    restraint as the milestone before this one).
+
 - [x] **PyPI distribution, 0.1.0a1 then 0.1.0a2** — the first time this
       project's own installability, not just its behavior against a real
       target repository, became the thing under test. `0.1.0a1`: version

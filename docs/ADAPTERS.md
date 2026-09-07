@@ -295,6 +295,30 @@ entry, summarized here:**
    `bindings_for_import_from`/`_package_of`, opting out of the one
    truncation that assumes the importing file is an ordinary module.
 
+**Resolution Integrity R1: import re-export chains, and a permanent gap
+corpus.** Building a systematic import/call resolution matrix
+(`tests/unit/test_python_import_resolution_matrix.py`/
+`test_python_call_resolution_matrix.py`, mirroring
+`test_sqlalchemy_coverage_matrix.py`'s own table-docstring-as-audit shape)
+surfaced a fourth real bug, not from a real repository this time but from
+writing the corpus itself: `pkg/__init__.py` doing `from pkg.sub import
+Thing`, then `consumer.py` doing `from pkg import Thing`, resolves
+`consumer.py`'s own target to the literal `pkg.Thing` — which names no
+entity, since `pkg` re-exports a name it does not itself define. The
+module-scoped twin of the singleton-instance gap two entries above: Stage 1
+never chases another file's own import statement, by design.
+`normalizer.py`'s `_retarget_through_module_instance` was generalized (not
+duplicated) into `_resolve_through_aliases`, over a merged `alias_targets`
+map combining every module-instance binding *and* every import's own
+`bound_name -> target` binding — both deterministic facts about Python's
+binding semantics, never a guess — applied uniformly to `CALLS`, `IMPORTS`,
+and `EXTENDS` resolution, bounded to 5 chained hops so a re-export of a
+re-export resolves correctly without risking an unbounded chase.
+`docs/ROADMAP.md`'s "Resolution Integrity R1" entry has the full account,
+including the re-verification against the real-repository benchmark this
+generalization was proven against (131 → 167 real `reverse_impact` paths on
+the exact same query, benchmark repository itself untouched).
+
 **What this adapter can offer on its own, and where Git now picks up the
 rest** — found by the adversarial identity suite rather than assumed up
 front: on its own, `QUALIFIED_NAME` and `DECLARATION_ANCHOR` (file +

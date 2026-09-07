@@ -120,28 +120,57 @@ def _symbol_entity(obs: Observation, *, system_id: SystemID, revision: str | Non
     )
 
 
-def _retarget_through_module_instance(
-    resolved_qn: str, instance_class_by_qn: dict[str, str]
-) -> str | None:
-    """A call Stage 1 resolved (single-file) against an *imported name*'s own
-    literal target -- e.g. `kafka_publisher.push_notification` resolving to
-    `common.kafka.kafka_publisher.push_notification` -- never matches a real
-    entity when the imported name is actually a module-level *instance* of a
-    class defined elsewhere (`kafka_publisher = KafkaEventPublisher()` in
-    `common/kafka/__init__.py`), not a class/function/submodule itself.
-    Stage 1 cannot know this (a different file); this stage can, from every
-    `python.module_instance` observation the whole run produced. Re-targets
-    through the *longest* matching instance prefix, so a nested singleton
-    (rare, but possible) resolves against its own most specific binding."""
-    best_prefix = ""
-    for instance_qn in instance_class_by_qn:
-        prefix = f"{instance_qn}."
-        if resolved_qn.startswith(prefix) and len(prefix) > len(best_prefix):
-            best_prefix = prefix
-    if not best_prefix:
-        return None
-    remainder = resolved_qn[len(best_prefix) :]
-    return f"{instance_class_by_qn[best_prefix[:-1]]}.{remainder}"
+def _resolve_through_aliases(
+    resolved_qn: str,
+    by_qualified_name: dict[str, Entity],
+    alias_targets: dict[str, str],
+    *,
+    max_hops: int = 5,
+) -> Entity | None:
+    """A name Stage 1 resolved (single-file) against its own *literal* import
+    target never matches a real entity in two related, real-world-common
+    shapes -- neither a guess, both deterministic facts about Python's own
+    binding semantics that only this stage, with whole-run visibility, can
+    confirm:
+
+    - **Module-level singleton instance**: `kafka_publisher =
+      KafkaEventPublisher()` at module scope, called from another file as
+      `kafka_publisher.push_notification(...)` -- Stage 1 resolves the call
+      to `common.kafka.kafka_publisher.push_notification`, which names no
+      entity, because the imported name is an *instance* of a class defined
+      elsewhere, not a class/function/submodule itself.
+    - **Import re-export**: `pkg/__init__.py` doing `from pkg.sub import
+      Thing`, then `consumer.py` doing `from pkg import Thing` -- Stage 1
+      resolves `consumer.py`'s target to the literal `pkg.Thing`, which
+      names no entity, because `pkg`'s own `__init__.py` re-exports a name
+      it does not itself define. `from a import b` genuinely makes `a.b`
+      the same object as wherever `b` really lives -- this is Python's own
+      import semantics, not a heuristic.
+
+    `alias_targets` merges both: every module-level instance's own
+    qualified name -> its class, and every import's own `importer.bound_name`
+    -> its target. Re-targets through the *longest* matching alias prefix,
+    checking `by_qualified_name` after each substitution and returning as
+    soon as one lands on a real entity -- chained up to `max_hops` (a
+    re-export of a re-export, say), bounded so a pathological or circular
+    chain terminates rather than looping forever, never fabricating a
+    substitution beyond what this run's own observations actually recorded.
+    """
+    candidate = resolved_qn
+    for _ in range(max_hops):
+        best_alias_qn = ""
+        for alias_qn in alias_targets:
+            matches = candidate == alias_qn or candidate.startswith(f"{alias_qn}.")
+            if matches and len(alias_qn) > len(best_alias_qn):
+                best_alias_qn = alias_qn
+        if not best_alias_qn:
+            return None
+        remainder = candidate[len(best_alias_qn) :]
+        candidate = alias_targets[best_alias_qn] + remainder
+        found = by_qualified_name.get(candidate)
+        if found is not None:
+            return found
+    return None
 
 
 def normalize(
@@ -149,11 +178,20 @@ def normalize(
 ) -> NormalizedRun:
     entities: list[Entity] = []
     by_qualified_name: dict[str, Entity] = {}
-    instance_class_by_qn: dict[str, str] = {
-        str(obs.payload["qualified_name"]): str(obs.payload["instance_of"])
+    alias_targets: dict[str, str] = {
+        f"{obs.payload['importer_qualified_name']}.{obs.payload['bound_name']}": str(
+            obs.payload["target"]
+        )
         for obs in observations
-        if obs.kind == "python.module_instance"
+        if obs.kind == "python.import"
     }
+    alias_targets.update(
+        {
+            str(obs.payload["qualified_name"]): str(obs.payload["instance_of"])
+            for obs in observations
+            if obs.kind == "python.module_instance"
+        }
+    )
 
     for obs in observations:
         if obs.kind == "python.module":
@@ -191,7 +229,10 @@ def normalize(
 
         elif obs.kind == "python.import":
             importer = by_qualified_name.get(str(obs.payload["importer_qualified_name"]))
-            target = by_qualified_name.get(str(obs.payload["target"]))
+            target_qn = str(obs.payload["target"])
+            target = by_qualified_name.get(target_qn)
+            if target is None:
+                target = _resolve_through_aliases(target_qn, by_qualified_name, alias_targets)
             if importer is not None and target is not None and importer.id != target.id:
                 relationships.append(
                     Relationship(
@@ -211,6 +252,8 @@ def normalize(
             resolved_qn = obs.payload.get("resolved_qualified_name")
             subclass = by_qualified_name.get(str(obs.payload["class_qualified_name"]))
             base = by_qualified_name.get(str(resolved_qn)) if resolved_qn else None
+            if base is None and resolved_qn:
+                base = _resolve_through_aliases(str(resolved_qn), by_qualified_name, alias_targets)
             if subclass is not None and base is not None:
                 relationships.append(
                     Relationship(
@@ -231,11 +274,9 @@ def normalize(
             caller = by_qualified_name.get(str(obs.payload["caller_qualified_name"]))
             callee = by_qualified_name.get(str(resolved_qn)) if resolved_qn else None
             if callee is None and resolved_qn:
-                retargeted = _retarget_through_module_instance(
-                    str(resolved_qn), instance_class_by_qn
+                callee = _resolve_through_aliases(
+                    str(resolved_qn), by_qualified_name, alias_targets
                 )
-                if retargeted is not None:
-                    callee = by_qualified_name.get(retargeted)
             if caller is not None and callee is not None and caller.id != callee.id:
                 relationships.append(
                     Relationship(
