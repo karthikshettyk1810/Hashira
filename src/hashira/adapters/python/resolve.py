@@ -129,28 +129,45 @@ def bindings_for_import(node: ast.Import) -> list[ImportBinding]:
     return bindings
 
 
-def _package_of(module_qualified_name: str, level: int) -> str:
+def _package_of(module_qualified_name: str, level: int, *, is_package_init: bool = False) -> str:
     """The package a relative import is anchored to (PEP 328).
 
     ``level=1`` ("from . import x") means the current module's own package;
     each additional level walks one package further up.
+
+    A real-repository finding: for an ordinary module (``shop/checkout.py``,
+    qualified name ``shop.checkout``), "its own package" is one component up
+    (``shop``) — dropping the last dotted component is correct. But a
+    package's own ``__init__.py`` (``common/kafka/__init__.py``) already
+    *has* the qualified name of the package itself (``common.kafka`` —
+    `module_qualified_name` strips the trailing ``__init__``, by design), so
+    dropping a component here walks one package too far up
+    (`from .publisher import X` inside `common/kafka/__init__.py` resolved
+    to `common.publisher.X`, not `common.kafka.publisher.X`) — silently
+    wrong, not merely unresolved, since a plausible-looking wrong target can
+    still coincidentally exist. `is_package_init` opts out of that one
+    truncation; every other level and every ordinary module is unaffected.
     """
     if level <= 0:
         return module_qualified_name
-    parts = module_qualified_name.split(".")[:-1]
+    parts = module_qualified_name.split(".")
+    if not is_package_init:
+        parts = parts[:-1]
     for _ in range(level - 1):
         parts = parts[:-1]
     return ".".join(parts)
 
 
 def bindings_for_import_from(
-    module_qualified_name: str, node: ast.ImportFrom
+    module_qualified_name: str, node: ast.ImportFrom, *, is_package_init: bool = False
 ) -> list[ImportBinding]:
     """Resolve a `from ... import ...` statement relative to the importing
     module's own dotted name. Star imports are skipped, not guessed at — a
-    wildcard genuinely does not say what it binds without executing it."""
+    wildcard genuinely does not say what it binds without executing it.
+    ``is_package_init`` — see `_package_of` — must be true when the
+    importing file is a package's own ``__init__.py``."""
     if node.level:
-        package = _package_of(module_qualified_name, node.level)
+        package = _package_of(module_qualified_name, node.level, is_package_init=is_package_init)
         base = f"{package}.{node.module}" if node.module else package
     else:
         base = node.module or ""

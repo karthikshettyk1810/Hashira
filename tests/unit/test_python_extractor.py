@@ -54,6 +54,19 @@ def test_module_qualified_name_needs_no_init_for_namespace_packages(tmp_path: Pa
     assert module_qualified_name(file, tmp_path) == "shop.sub.payments"
 
 
+def test_module_qualified_name_falls_back_to_root_name_for_the_roots_own_init(
+    tmp_path: Path,
+) -> None:
+    """A real-repository crash: when the import root itself is a Python
+    package (`<root>/__init__.py`, e.g. a Django project's settings package
+    doubling as the indexed root), the path-relative name is empty by
+    construction. `Entity(name="")` used to crash the entire indexing run;
+    falling back to the root directory's own name is real, not fabricated —
+    it is genuinely importable as such one level up."""
+    file = _write(tmp_path, "__init__.py", "")
+    assert module_qualified_name(file, tmp_path) == tmp_path.name
+
+
 # --- module + symbol extraction -------------------------------------------
 
 
@@ -162,6 +175,22 @@ import os
         "models": "django.db.models",
         "os": "os",
     }
+
+
+def test_relative_import_inside_a_package_init_resolves_against_itself(
+    tmp_path: Path, system_id: str
+) -> None:
+    """End-to-end version of `test_python_resolve.py`'s package-init finding:
+    a relative import written in `common/kafka/__init__.py` must resolve
+    against `common.kafka` itself, not `common` (its own parent)."""
+    result = _extract(
+        tmp_path, "common/kafka/__init__.py", "from .publisher import Foo\n", system_id
+    )
+    imports = {
+        i.payload["bound_name"]: i.payload["target"]
+        for i in _by_kind(result.observations, "python.import")
+    }
+    assert imports == {"Foo": "common.kafka.publisher.Foo"}
 
 
 # --- calls: every resolution kind -----------------------------------------
@@ -609,6 +638,127 @@ class Foo:
     result = _extract(tmp_path, "shop/foo.py", source, system_id)
     calls = [c.payload["callee_expr"] for c in _by_kind(result.observations, "python.call")]
     assert sorted(calls) == ["range", "self.a", "self.b", "self.c"]
+
+
+# --- function-local imports (a common circular-import / lazy-import idiom) -
+
+
+def test_function_local_import_resolves_a_call(tmp_path: Path, system_id: str) -> None:
+    """`from common.kafka import kafka_publisher` written inside a function
+    body, not at module level -- a common idiom for breaking a circular
+    import or deferring an expensive one -- previously never entered
+    `ResolutionContext.imports` at all: `_module_level_imports` explicitly
+    skips descending into a function body, and nothing else picked the
+    binding up. `kafka_publisher.push_notification(...)` fell straight to
+    UNRESOLVED, silently, with no disclosed limitation naming this gap."""
+    source = """
+def enqueue_push_notification(payload):
+    from common.kafka import kafka_publisher
+    kafka_publisher.push_notification(payload)
+"""
+    result = _extract(tmp_path, "common/outbox/service.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert calls["kafka_publisher.push_notification"]["resolution"] == "IMPORT"
+    assert (
+        calls["kafka_publisher.push_notification"]["resolved_qualified_name"]
+        == "common.kafka.kafka_publisher.push_notification"
+    )
+
+
+def test_function_local_import_emits_an_imports_observation(
+    tmp_path: Path, system_id: str
+) -> None:
+    """The `IMPORTS` relationship is a module-level fact regardless of which
+    scope the `import` statement sits in -- a function-local import must
+    still produce a `python.import` observation, not just a resolvable call
+    binding."""
+    source = """
+def send(payload):
+    from common.kafka import kafka_publisher
+    kafka_publisher.push_notification(payload)
+"""
+    result = _extract(tmp_path, "common/outbox/service.py", source, system_id)
+    imports = {
+        i.payload["bound_name"]: i.payload["target"]
+        for i in _by_kind(result.observations, "python.import")
+    }
+    assert imports["kafka_publisher"] == "common.kafka.kafka_publisher"
+
+
+def test_function_local_import_does_not_leak_to_a_sibling_function(
+    tmp_path: Path, system_id: str
+) -> None:
+    """A function-local import binds a name only within that function's own
+    scope, matching real Python semantics -- a sibling function that never
+    imported the name itself must not resolve a same-named call."""
+    source = """
+def enqueue_push_notification(payload):
+    from common.kafka import kafka_publisher
+    kafka_publisher.push_notification(payload)
+
+
+def some_other_function(payload):
+    kafka_publisher.push_notification(payload)
+"""
+    result = _extract(tmp_path, "common/outbox/service.py", source, system_id)
+    calls = [
+        c.payload
+        for c in _by_kind(result.observations, "python.call")
+        if c.payload["callee_expr"] == "kafka_publisher.push_notification"
+    ]
+    by_caller = {c["caller_qualified_name"]: c for c in calls}
+    assert by_caller["common.outbox.service.enqueue_push_notification"]["resolution"] == "IMPORT"
+    assert by_caller["common.outbox.service.some_other_function"]["resolution"] == "UNRESOLVED"
+
+
+def test_function_local_import_shadows_a_module_level_import(
+    tmp_path: Path, system_id: str
+) -> None:
+    """A function-local import of the same name as a module-level import
+    shadows it within that function's scope -- matching real Python name
+    resolution, not a static merge that could pick either binding."""
+    source = """
+from common.kafka import legacy_publisher as kafka_publisher
+
+
+def enqueue_push_notification(payload):
+    from common.kafka.v2 import kafka_publisher
+    kafka_publisher.push_notification(payload)
+"""
+    result = _extract(tmp_path, "common/outbox/service.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert (
+        calls["kafka_publisher.push_notification"]["resolved_qualified_name"]
+        == "common.kafka.v2.kafka_publisher.push_notification"
+    )
+
+
+def test_function_local_import_resolves_a_constructor_call(
+    tmp_path: Path, system_id: str
+) -> None:
+    """A function-local import feeds `_local_instance_types` too, not only
+    direct calls -- `x = LocallyImportedClass()` then `x.method()` inside the
+    same function must resolve through the local import, not just a call on
+    the imported name itself."""
+    source = """
+def handle(payload):
+    from common.kafka import KafkaEventPublisher
+    publisher = KafkaEventPublisher()
+    publisher.push_notification(payload)
+"""
+    result = _extract(tmp_path, "common/outbox/service.py", source, system_id)
+    calls = {
+        c.payload["callee_expr"]: c.payload for c in _by_kind(result.observations, "python.call")
+    }
+    assert calls["publisher.push_notification"]["resolution"] == "LOCAL_INSTANCE"
+    assert (
+        calls["publisher.push_notification"]["resolved_qualified_name"]
+        == "common.kafka.KafkaEventPublisher.push_notification"
+    )
 
 
 # --- inheritance ---------------------------------------------------------

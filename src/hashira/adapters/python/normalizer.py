@@ -120,11 +120,40 @@ def _symbol_entity(obs: Observation, *, system_id: SystemID, revision: str | Non
     )
 
 
+def _retarget_through_module_instance(
+    resolved_qn: str, instance_class_by_qn: dict[str, str]
+) -> str | None:
+    """A call Stage 1 resolved (single-file) against an *imported name*'s own
+    literal target -- e.g. `kafka_publisher.push_notification` resolving to
+    `common.kafka.kafka_publisher.push_notification` -- never matches a real
+    entity when the imported name is actually a module-level *instance* of a
+    class defined elsewhere (`kafka_publisher = KafkaEventPublisher()` in
+    `common/kafka/__init__.py`), not a class/function/submodule itself.
+    Stage 1 cannot know this (a different file); this stage can, from every
+    `python.module_instance` observation the whole run produced. Re-targets
+    through the *longest* matching instance prefix, so a nested singleton
+    (rare, but possible) resolves against its own most specific binding."""
+    best_prefix = ""
+    for instance_qn in instance_class_by_qn:
+        prefix = f"{instance_qn}."
+        if resolved_qn.startswith(prefix) and len(prefix) > len(best_prefix):
+            best_prefix = prefix
+    if not best_prefix:
+        return None
+    remainder = resolved_qn[len(best_prefix) :]
+    return f"{instance_class_by_qn[best_prefix[:-1]]}.{remainder}"
+
+
 def normalize(
     observations: Sequence[Observation], *, system_id: SystemID, revision: str | None
 ) -> NormalizedRun:
     entities: list[Entity] = []
     by_qualified_name: dict[str, Entity] = {}
+    instance_class_by_qn: dict[str, str] = {
+        str(obs.payload["qualified_name"]): str(obs.payload["instance_of"])
+        for obs in observations
+        if obs.kind == "python.module_instance"
+    }
 
     for obs in observations:
         if obs.kind == "python.module":
@@ -201,6 +230,12 @@ def normalize(
             resolved_qn = obs.payload.get("resolved_qualified_name")
             caller = by_qualified_name.get(str(obs.payload["caller_qualified_name"]))
             callee = by_qualified_name.get(str(resolved_qn)) if resolved_qn else None
+            if callee is None and resolved_qn:
+                retargeted = _retarget_through_module_instance(
+                    str(resolved_qn), instance_class_by_qn
+                )
+                if retargeted is not None:
+                    callee = by_qualified_name.get(retargeted)
             if caller is not None and callee is not None and caller.id != callee.id:
                 relationships.append(
                     Relationship(

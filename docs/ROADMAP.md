@@ -1195,6 +1195,155 @@ core rather than the adapter.
       on this round; whether it earns its own `LimitationKind` is an open
       question for whenever a real task next depends on the answer.
 
+- [x] **Real Repository Pilot v0.2: function-local imports** — an agent
+      given the published MCP server against a real, previously-unseen
+      Django/Kafka backend, asked to investigate a notification pipeline
+      with no hints about which tools existed, found `reverse_impact`/
+      `get_relationships` on the pipeline's core functions returning
+      `DEFINES` edges only — zero `CALLS` edges anywhere in the queried
+      neighborhood, `coverage.status: PARTIAL` but with no disclosed
+      limitation naming why. The agent's own diagnosis, cross-checked
+      against a full manual grep pass it ran in parallel: nearly every
+      caller in the pipeline imported its dependency *inside* the calling
+      function (`def enqueue_push_notification(...): from common.kafka
+      import kafka_publisher; kafka_publisher.push_notification(...)`)
+      rather than at module level — the codebase's dominant style for
+      breaking circular imports, not a rare shape, exactly the same kind of
+      finding the `SELF_ATTRIBUTE`/fallback-default/typed-parameter fixes
+      above were each built from.
+  - **Root cause, traced to `extractor.py`**: `_module_level_imports`
+      explicitly refuses to descend into a function or class body when
+      collecting import bindings — by design, since it exists to build the
+      *module-level* resolution context. But nothing built the equivalent
+      *function-level* context: a function-local import never entered
+      `ResolutionContext.imports` for any scope at all, so a call through
+      the name it bound fell straight to `UNRESOLVED`, silently, with no
+      `LimitationKind` describing this specific, extremely common gap.
+  - **Fixed, narrowly, same discipline as every resolver fix before it**:
+      `_function_local_imports` (new) scans a function's own body — not
+      descending into a *nested* def/class, matching `_local_instance_types`'
+      own scoping exactly — for import statements, and its bindings are
+      merged into that function's own `ResolutionContext.imports` before
+      resolving parameters, local instances, or calls within it: shadowing a
+      same-named module-level import within that one function (real Python
+      scoping), never leaking to a sibling function that imported nothing
+      itself, and available to a nested function through the same `ctx`
+      threading that already gives nested functions their enclosing scope
+      (a real closure property, not a new mechanism). Because an import
+      statement names its target exactly — this is not a guess about a
+      name's type, unlike every fix in this section's siblings — the fix is
+      complete for this syntactic form, not a partial widening. A companion
+      fix (`_all_imports`, renamed from `_top_level_imports`) walks the
+      *entire* file for `python.import` Observations, not just statements
+      outside a function/class body, so a function-local import now also
+      produces a real `IMPORTS` relationship — a second, independent gap
+      the same root cause created, since an `IMPORTS` edge is a module-level
+      fact regardless of which scope triggers it.
+  - **The acceptance criterion**: 5 new regression tests
+      (`tests/unit/test_python_extractor.py`) covering direct resolution,
+      the `IMPORTS` observation, no leakage to a sibling function, shadowing
+      a module-level import of the same name, and a function-local import
+      feeding `_local_instance_types` so a subsequently-constructed
+      instance's own methods resolve too; all 259 pre-existing tests, mypy
+      --strict, and ruff stayed green unchanged. `docs/ADAPTERS.md`'s
+      "Fixed in a later round — function-local imports" entry has the full
+      account.
+  - **Deliberately not attempted, same restraint as the rest of this
+      module**: a class-body-level import (as opposed to a function/method
+      body) is not bound for resolution, only observed for `IMPORTS` — a
+      materially rarer idiom than a function-local one, and nothing forced
+      the question yet.
+  - **Acceptance-test verification surfaced two more real gaps and one real
+      crash before the fix could even be confirmed — all closed as part of
+      this same milestone, not deferred**, holding the fix to its own
+      acceptance test (`KafkaEventPublisher.push_notification` → all real
+      callers → their callers) rather than trusting the unit tests alone:
+    1. **A full indexing crash, not a partial failure.** Indexing the real
+       repository's actual Python root (`backend/`, per `ADAPTERS.md`'s own
+       documented monorepo workaround) rather than its Git root — the
+       correct root, previously never exercised this way — raised
+       `pydantic_core.ValidationError: Entity.name string_too_short` and
+       aborted the *entire* run. Root cause: `backend/__init__.py` (a
+       Django project's settings package, itself importable by the root
+       directory's own name one level up, while everything under it imports
+       unprefixed) computed to an empty dotted name (`module_qualified_name`
+       relative to itself), and `Entity(name="")` failed validation instead
+       of merely being skipped — directly violating this project's own
+       adapter contract ("skip the file, don't abort the run"). Fixed in
+       `module_qualified_name` (`extractor.py`): when the computed name is
+       empty (`file` *is* `import_root/__init__.py`), fall back to the
+       import root's own directory name — real and non-fabricated (it is
+       genuinely importable as such one level up), not empty. One
+       regression test (`test_module_qualified_name_falls_back_to_root_name_for_the_roots_own_init`).
+    2. **Module-level singleton instances, the module-scoped twin of the
+       already-logged `self._settings = settings or get_settings()`
+       ambiguity.** With the crash fixed and indexing succeeding, the
+       target entity itself (`push_notification`) still showed *zero*
+       reverse-impact paths despite every upstream caller now resolving —
+       `common/kafka/__init__.py` defines `kafka_publisher =
+       KafkaEventPublisher()` at module scope, and every caller does `from
+       common.kafka import kafka_publisher; kafka_publisher.push_notification(...)`.
+       Stage 1 (single-file) can only resolve `kafka_publisher` against its
+       own literal import target (`common.kafka.kafka_publisher.push_notification`),
+       which names no real entity — it has no way to know, from an import
+       statement alone, that the imported name is an *instance* of a class
+       defined in a different file rather than a class/function/submodule
+       itself. Confirmed a common pattern in this codebase, not a one-off
+       (Celery app, Django settings, Kafka config/registry, Firebase
+       client — all the same module-level-singleton-client idiom). Fixed
+       with a new mechanism spanning both stages: `extractor.py`'s new
+       `_module_level_instance_assignments`/`_emit_module_instance` detect
+       `name = ClassName(...)` at module scope and emit a
+       `python.module_instance` observation (`{qualified_name, instance_of}`);
+       `normalizer.py`'s new `_retarget_through_module_instance` — Stage 2,
+       which has whole-run visibility Stage 1 deliberately never has — then
+       re-targets a call that failed its direct qualified-name lookup
+       through the *longest* matching known instance prefix before giving
+       up. Two regression tests, including one proving a retarget that
+       matches no real method on the instance's class stays unresolved,
+       never a fabricated nearby match.
+    3. **A pre-existing, unrelated bug found incidentally while writing
+       test fixtures for (2), in `resolve.py`'s relative-import handling.**
+       `_package_of` always drops the importing module's last dotted
+       component to find "its own package" — correct for an ordinary module
+       (`shop/checkout.py`, qualified name `shop.checkout`, own package
+       `shop`), but wrong for a package's own `__init__.py`
+       (`common/kafka/__init__.py`, qualified name already `common.kafka` —
+       `module_qualified_name` strips the trailing `__init__` by design),
+       where dropping a component walks one package too far up: `from
+       .publisher import X` written inside `common/kafka/__init__.py`
+       silently resolved to `common.publisher.X` instead of
+       `common.kafka.publisher.X` — wrong, not merely unresolved, since a
+       plausible-looking wrong target can coincidentally exist. (The real
+       repository's own `common/kafka/__init__.py` happens to use an
+       absolute import, so this specific bug did not affect the acceptance
+       test itself — found by a test fixture mirroring the real file
+       layout with a relative import instead, and worth fixing regardless
+       since it is real and silent.) Fixed by threading a new
+       `is_package_init: bool` flag (`_Walker.is_package_init = file.name
+       == "__init__.py"`) through every `bindings_for_import_from` call
+       site into `_package_of`, which skips its one truncation exactly when
+       `is_package_init` is true — every other level and every ordinary
+       module is provably unaffected (a dedicated regression test pins the
+       default-`False` behavior byte-for-byte). Four regression tests
+       across `test_python_resolve.py`/`test_python_extractor.py`.
+  - **Re-verified against the real repository after all three fixes**:
+      re-indexed cleanly (0 crashes, 349 files, 2529 entities, 5464
+      relationships, up from 5365 after the function-local-import fix
+      alone), and `reverse_impact` on `KafkaEventPublisher.push_notification`
+      — the acceptance test's actual target — went from 0 paths to 131,
+      with all five real production entry points (`notify_hub_assignments`,
+      `_publish_push_notification`, `notify_tour_assigned`,
+      `evaluate_and_maybe_reroute`, and a smoke script) resolving as direct,
+      `CERTAIN`-confidence `CALLS` edges, chained further back through their
+      own real callers (Celery tasks, DRF views, management commands) —
+      matching the transcript this whole milestone was built from,
+      end-to-end, not merely in a synthetic fixture. `coverage.status`
+      stayed honestly `PARTIAL` throughout, with the same three structural
+      limitations (`DYNAMIC_DISPATCH`, `FRAMEWORK_REFLECTION`, `RAW_SQL`)
+      correctly still disclosed — none of these three fixes touch what
+      those limitations describe.
+
 - [x] **PyPI distribution, 0.1.0a1 then 0.1.0a2** — the first time this
       project's own installability, not just its behavior against a real
       target repository, became the thing under test. `0.1.0a1`: version

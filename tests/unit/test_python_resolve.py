@@ -77,6 +77,45 @@ def test_bindings_for_import_from(
     assert [(b.bound_name, b.target) for b in bindings] == expected
 
 
+def test_relative_import_inside_a_package_init_anchors_on_itself_not_its_parent() -> None:
+    """A real-repository finding: `common/kafka/__init__.py` (qualified name
+    `common.kafka` -- `module_qualified_name` already strips `__init__`) is
+    itself the package a relative import inside it is relative to. Treating
+    it like an ordinary module (dropping one more dotted component, as if
+    `common.kafka` were `common.kafka.something`) silently resolves
+    `from .publisher import X` to `common.publisher.X` instead of
+    `common.kafka.publisher.X` -- wrong, not merely unresolved, since the
+    wrong target can coincidentally look plausible."""
+    node = _parse_stmt("from .publisher import KafkaEventPublisher")
+    assert isinstance(node, ast.ImportFrom)
+    bindings = bindings_for_import_from("common.kafka", node, is_package_init=True)
+    assert [(b.bound_name, b.target) for b in bindings] == [
+        ("KafkaEventPublisher", "common.kafka.publisher.KafkaEventPublisher")
+    ]
+
+
+def test_relative_import_inside_a_package_init_one_level_up() -> None:
+    """`from .. import x` inside `common/kafka/__init__.py` walks one
+    package above `common.kafka` itself, i.e. `common` -- not two levels
+    above it, the way the ordinary-module formula would compute."""
+    node = _parse_stmt("from .. import shared")
+    assert isinstance(node, ast.ImportFrom)
+    bindings = bindings_for_import_from("common.kafka", node, is_package_init=True)
+    assert [(b.bound_name, b.target) for b in bindings] == [("shared", "common.shared")]
+
+
+def test_relative_import_inside_an_ordinary_module_is_unaffected_by_the_flag() -> None:
+    """`is_package_init=False` (the default) must reproduce the exact,
+    already-correct behavior for a regular module -- this fix must not
+    change resolution for the overwhelmingly common non-`__init__.py` case."""
+    node = _parse_stmt("from .payments import PaymentService")
+    assert isinstance(node, ast.ImportFrom)
+    bindings = bindings_for_import_from("shop.checkout", node, is_package_init=False)
+    assert [(b.bound_name, b.target) for b in bindings] == [
+        ("PaymentService", "shop.payments.PaymentService")
+    ]
+
+
 def test_star_import_is_skipped_not_guessed() -> None:
     node = _parse_stmt("from os.path import *")
     assert isinstance(node, ast.ImportFrom)

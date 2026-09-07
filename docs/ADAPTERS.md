@@ -215,6 +215,86 @@ today is scoped only to the SQLAlchemy adapter's field-access mechanism);
 whether it deserves one is a real, open question for a future round, not
 decided here.
 
+**Fixed in a later round — function-local imports.** A live-agent run
+against a real, previously-unseen repository (a Django/Kafka backend) found
+`reverse_impact`/`get_relationships` returning `DEFINES` edges only — zero
+`CALLS` edges anywhere in the queried neighborhood, `coverage: PARTIAL` with
+no limitation naming why. Root cause: `from common.kafka import
+kafka_publisher` written *inside* a function body (`def
+enqueue_push_notification(...): from common.kafka import kafka_publisher;
+kafka_publisher.push_notification(...)`) rather than at module level —
+lazy/deferred imports and the standard way to break a circular import in a
+large codebase, and, per that investigation, the *dominant* import style at
+every call site that mattered. `_module_level_imports` (`extractor.py`)
+never descended into a function body at all, so a function-local import
+never entered `ResolutionContext.imports`, for that function or any other —
+the call fell straight to `UNRESOLVED`, silently, exactly the same failure
+shape as the `SELF_ATTRIBUTE`/fallback-default/typed-parameter gaps above,
+just one syntactic form earlier: the collaborator's *type* was never the
+problem here, its *name* was never bound in the first place.
+
+Closed the same way every gap above was closed — narrowly, syntactically,
+never a guess layered on a guess. `extractor.py`'s new
+`_function_local_imports` scans a function's own body (not descending into a
+*nested* def/class, exactly like `_local_instance_types`' own scoping) for
+`import`/`from ... import ...` statements and merges their bindings into
+that function's `ResolutionContext.imports` alone — shadowing a same-named
+module-level import within that function, matching real Python scoping, and
+never leaking to a sibling function that imported nothing itself. Because an
+import statement is syntactic ground truth (not a guess about what a name's
+type might be), the fix is complete for this form, not a partial widening —
+`kafka_publisher.push_notification(...)` now resolves at `IMPORT` tier, the
+same confidence a module-level import already gets. A companion fix widened
+`_all_imports` (renamed from `_top_level_imports`) to walk the *entire*
+file, not just statements outside a function/class body, so a
+function-local import also produces its own `python.import` Observation and
+a real `IMPORTS` relationship — previously invisible to that edge type too,
+independently of the `CALLS`-resolution gap. `tests/unit/
+test_python_extractor.py`'s function-local-imports section holds five
+regression cases: direct resolution, the `IMPORTS` observation, no leakage
+to a sibling function, shadowing a module-level import of the same name, and
+feeding a function-local import into `_local_instance_types` so a
+subsequently-constructed instance's methods resolve too.
+
+**What this fix does not attempt, deliberately, same discipline as
+everywhere else in this module**: a class-body-level import (as opposed to a
+function/method body) is not bound for resolution — only its `IMPORTS`
+observation is captured via `_all_imports`, since class-body-scoped imports
+are a materially rarer idiom than function-local ones and nothing forced
+this question yet; multi-level nested functions correctly inherit an outer
+function's local imports through the same `ctx` threading a closure would
+use, which is real Python behavior, not an extra mechanism built for it.
+
+**Acceptance-test verification against the real repository surfaced three
+more real issues before the function-local-import fix above could even be
+confirmed — full account in `docs/ROADMAP.md`'s "Real Repository Pilot v0.2"
+entry, summarized here:**
+
+1. A full indexing *crash* (not a partial failure) when the import root
+   itself is a Python package: `<root>/__init__.py`'s dotted name is empty
+   relative to itself, and `Entity(name="")` failed validation instead of
+   being skipped. Fixed in `module_qualified_name` — falls back to the
+   import root's own directory name, a real, non-fabricated identifier.
+2. **Module-level singleton instances** — `kafka_publisher =
+   KafkaEventPublisher()` at module scope, imported and called from another
+   file — are the module-scoped twin of the `self._settings = settings or
+   get_settings()` class/function ambiguity above: Stage 1 cannot know an
+   imported name is an *instance*, not a class/function/module, without
+   reading its defining file. Closed at Stage 2 instead (which has
+   whole-run visibility Stage 1 deliberately never has): a new
+   `python.module_instance` observation records `name = ClassName(...)`
+   assignments at module scope, and `normalizer.py`'s
+   `_retarget_through_module_instance` re-targets a call that failed its
+   direct qualified-name lookup through the longest matching known instance
+   prefix, never fabricating a match to something that isn't really there.
+3. A pre-existing, unrelated bug in `resolve.py`'s `_package_of`, found
+   incidentally while writing a test fixture for (2): a relative import
+   written inside a package's own `__init__.py` (whose qualified name
+   already *is* the package, not a leaf module) resolved one package too
+   far up. Fixed by threading a new `is_package_init` flag into
+   `bindings_for_import_from`/`_package_of`, opting out of the one
+   truncation that assumes the importing file is an ordinary module.
+
 **What this adapter can offer on its own, and where Git now picks up the
 rest** — found by the adversarial identity suite rather than assumed up
 front: on its own, `QUALIFIED_NAME` and `DECLARATION_ANCHOR` (file +

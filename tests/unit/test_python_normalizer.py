@@ -216,3 +216,96 @@ def test_two_call_sites_to_the_same_target_produce_one_relationship(tmp_path: Pa
     assert len(calls) == 1
     # Evidence from both call sites survives the merge -- neither is dropped.
     assert len(calls[0].evidence_ids) == 2
+
+
+# --- module-level singleton instances (a real-repository finding) ---------
+
+
+def test_call_through_an_imported_module_level_singleton_resolves(tmp_path: Path) -> None:
+    """`kafka_publisher = KafkaEventPublisher()` at module scope in one file,
+    imported and called from another (`from common.kafka import
+    kafka_publisher; kafka_publisher.push_notification(...)`) -- a real
+    production repository's dominant singleton-client idiom. Stage 1 (single
+    file) can only resolve the call against the *literal* import target
+    (`common.kafka.kafka_publisher.push_notification`), which names no real
+    entity; Stage 2 must re-target it through the `python.module_instance`
+    observation the defining file produced."""
+    system_id = new_id(IDPrefix.SYSTEM)
+    observations = _extract_all(
+        tmp_path,
+        {
+            "common/kafka/publisher.py": (
+                "class KafkaEventPublisher:\n"
+                "    def push_notification(self, payload):\n"
+                "        pass\n"
+            ),
+            "common/kafka/__init__.py": (
+                "from common.kafka.publisher import KafkaEventPublisher\n\n"
+                "kafka_publisher = KafkaEventPublisher()\n"
+            ),
+            "common/outbox/service.py": (
+                "def enqueue_push_notification(payload):\n"
+                "    from common.kafka import kafka_publisher\n"
+                "    kafka_publisher.push_notification(payload)\n"
+            ),
+        },
+        system_id,
+    )
+    run = normalize(observations, system_id=system_id, revision="rev1")
+    by_qn = {e.qualified_name: e for e in run.entities}
+
+    calls = [r for r in run.relationships if r.type is RelationshipType.CALLS]
+    pairs = {(r.source_entity_id, r.target_entity_id) for r in calls}
+    caller = by_qn["common.outbox.service.enqueue_push_notification"].id
+    callee = by_qn["common.kafka.publisher.KafkaEventPublisher.push_notification"].id
+    assert (caller, callee) in pairs
+
+
+def test_singleton_retargeting_never_fabricates_a_match_for_an_unrelated_name(
+    tmp_path: Path,
+) -> None:
+    """A module-level instance whose class defines no method matching the
+    call's own suffix must not resolve to *something else* nearby -- an
+    unmatched retarget must stay unresolved, not a wrong-but-plausible-
+    looking edge."""
+    system_id = new_id(IDPrefix.SYSTEM)
+    observations = _extract_all(
+        tmp_path,
+        {
+            "common/kafka/publisher.py": (
+                "class KafkaEventPublisher:\n"
+                "    def push_notification(self, payload):\n"
+                "        pass\n"
+            ),
+            "common/kafka/__init__.py": (
+                "from common.kafka.publisher import KafkaEventPublisher\n\n"
+                "kafka_publisher = KafkaEventPublisher()\n"
+            ),
+            "common/outbox/service.py": (
+                "def send(payload):\n"
+                "    from common.kafka import kafka_publisher\n"
+                "    kafka_publisher.some_unrelated_method(payload)\n"
+            ),
+        },
+        system_id,
+    )
+    run = normalize(observations, system_id=system_id, revision="rev1")
+    by_qn = {e.qualified_name: e for e in run.entities}
+    calls = [r for r in run.relationships if r.type is RelationshipType.CALLS]
+    # The module-level `kafka_publisher = KafkaEventPublisher()` instantiation
+    # itself is a real, legitimate CALLS edge (the module really does call
+    # the constructor) -- unrelated to retargeting, and expected here.
+    pairs = {(r.source_entity_id, r.target_entity_id) for r in calls}
+    assert pairs == {
+        (
+            by_qn["common.kafka"].id,
+            by_qn["common.kafka.publisher.KafkaEventPublisher"].id,
+        )
+    }
+    unresolved_calls = [
+        obs
+        for obs in run.unresolved
+        if obs.kind == "python.call"
+        and obs.payload["callee_expr"] == "kafka_publisher.some_unrelated_method"
+    ]
+    assert len(unresolved_calls) == 1
