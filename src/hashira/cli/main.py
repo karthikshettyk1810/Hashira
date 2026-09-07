@@ -119,6 +119,7 @@ def _run_index(args: argparse.Namespace) -> int:
 
     from ..adapters._compose import compose_normalizers
     from ..adapters.django import DjangoAdapter
+    from ..adapters.django.normalizer import enrich_normalized_run as enrich_django
     from ..adapters.fastapi import FastAPIAdapter
     from ..adapters.fastapi.normalizer import enrich_normalized_run as enrich_fastapi
     from ..adapters.python import PythonAdapter
@@ -139,7 +140,9 @@ def _run_index(args: argparse.Namespace) -> int:
     # mypy's strict, invariant Protocol matching can't see -- not a
     # workaround for an actual mismatch.
     uow_factory = cast("Callable[[], UnitOfWork]", db.unit_of_work)
-    normalize = cast("Normalizer", compose_normalizers(enrich_fastapi, enrich_sqlalchemy))
+    normalize = cast(
+        "Normalizer", compose_normalizers(enrich_django, enrich_fastapi, enrich_sqlalchemy)
+    )
 
     service = IndexingService(
         uow_factory,

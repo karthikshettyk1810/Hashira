@@ -100,8 +100,15 @@ __all__ = [
     "ResolvedExpr",
     "bindings_for_import",
     "bindings_for_import_from",
+    "function_local_imports",
     "resolve_expr",
 ]
+
+# Node types that open a new lexical scope; `function_local_imports`' own
+# walk must not descend into them when looking for one function's *own*
+# local bindings -- an import inside a nested def/class belongs to that
+# nested scope, not this one.
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,3 +266,55 @@ def resolve_expr(expr: ast.expr, ctx: ResolutionContext) -> ResolvedExpr:
             qualified_name=_qualify(f"{ctx.module_qualified_name}.{leftmost}"),
         )
     return ResolvedExpr(text=text, resolution="UNRESOLVED", qualified_name=None)
+
+
+def function_local_imports(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, module_qn: str, *, is_package_init: bool = False
+) -> dict[str, str]:
+    """Import statements inside a function's own body -- a common idiom for
+    breaking circular imports or deferring an expensive import -- bind a
+    name only within that function's local scope, so they must be resolved
+    (and scoped) separately from a module's own top-level imports.
+    Descending into a nested def/class is skipped (their own imports belong
+    to their own scope), and a name bound here shadows the same name
+    imported at module level, matching real Python scoping.
+    ``is_package_init`` -- see `_package_of` above -- must be true when
+    this file is a package's own ``__init__.py``.
+
+    Public, not adapter-private: `adapters/python/extractor.py`'s own
+    Stage-1 walk was the first caller (a real-repository finding --
+    `docs/ROADMAP.md`'s "function-local imports" entry), and
+    `adapters/sqlalchemy/adapter.py`'s own, independent field-access
+    resolution needed the exact same mechanism for the exact same reason —
+    the trigger this project already uses for promoting something from
+    adapter-private to shared (`_python_index.py`'s own module docstring).
+    """
+    imports: dict[str, str] = {}
+
+    def record(node: ast.Import | ast.ImportFrom) -> None:
+        if isinstance(node, ast.Import):
+            for binding in bindings_for_import(node):
+                imports[binding.bound_name] = binding.target
+        else:
+            for binding in bindings_for_import_from(
+                module_qn, node, is_package_init=is_package_init
+            ):
+                imports[binding.bound_name] = binding.target
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.Import, ast.ImportFrom)):
+                record(child)
+            elif not isinstance(child, _SCOPE_NODES):
+                walk(child)
+
+    # `func.body`'s own statements are checked directly (not just their
+    # children) so an import as the function's very first statement — the
+    # overwhelmingly common case — is actually seen; a bare `walk(stmt)` per
+    # top-level statement would only ever inspect each statement's children.
+    for stmt in func.body:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            record(stmt)
+        else:
+            walk(stmt)
+    return imports

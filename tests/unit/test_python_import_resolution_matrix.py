@@ -308,14 +308,8 @@ def test_supported__same_target_imported_under_two_different_names(tmp_path: Pat
         tmp_path,
         {
             "lib.py": "def helper():\n    pass\n",
-            "app.py": (
-                "from lib import helper as h1\n\n\n"
-                "def a():\n    h1()\n"
-            ),
-            "app2.py": (
-                "from lib import helper as h2\n\n\n"
-                "def b():\n    h2()\n"
-            ),
+            "app.py": ("from lib import helper as h1\n\n\ndef a():\n    h1()\n"),
+            "app2.py": ("from lib import helper as h2\n\n\ndef b():\n    h2()\n"),
         },
         system_id,
     )
@@ -342,8 +336,7 @@ def test_supported__re_export_through_a_package_init(tmp_path: Path) -> None:
             "pkg/sub.py": "class Thing:\n    def method(self):\n        pass\n",
             "pkg/__init__.py": "from pkg.sub import Thing\n",
             "consumer.py": (
-                "from pkg import Thing\n\n\n"
-                "def use():\n    t = Thing()\n    t.method()\n"
+                "from pkg import Thing\n\n\ndef use():\n    t = Thing()\n    t.method()\n"
             ),
         },
         system_id,

@@ -193,6 +193,41 @@ def test_relative_import_inside_a_package_init_resolves_against_itself(
     assert imports == {"Foo": "common.kafka.publisher.Foo"}
 
 
+def test_import_observations_are_tagged_with_their_own_scope(
+    tmp_path: Path, system_id: str
+) -> None:
+    """A `python.import` observation carries `is_module_scope` so a consumer
+    that needs *only* a module's own import namespace (`PythonIndex`, shared
+    plumbing every framework enricher uses) can filter function-local
+    bindings out -- without this, two unrelated functions locally importing
+    the same name to different targets would collide in that shared index
+    (a real regression `_all_imports`' own widening to function bodies
+    introduced; see `_python_index.py`'s own filter)."""
+    source = """
+from module_z import Thing as ModuleLevelThing
+
+
+def func_a():
+    from module_x import Thing
+    return Thing()
+
+
+def func_b():
+    from module_y import Thing
+    return Thing()
+"""
+    result = _extract(tmp_path, "app.py", source, system_id)
+    scope_by_target = {
+        i.payload["target"]: i.payload["is_module_scope"]
+        for i in _by_kind(result.observations, "python.import")
+    }
+    assert scope_by_target == {
+        "module_z.Thing": True,
+        "module_x.Thing": False,
+        "module_y.Thing": False,
+    }
+
+
 # --- calls: every resolution kind -----------------------------------------
 
 
@@ -667,9 +702,7 @@ def enqueue_push_notification(payload):
     )
 
 
-def test_function_local_import_emits_an_imports_observation(
-    tmp_path: Path, system_id: str
-) -> None:
+def test_function_local_import_emits_an_imports_observation(tmp_path: Path, system_id: str) -> None:
     """The `IMPORTS` relationship is a module-level fact regardless of which
     scope the `import` statement sits in -- a function-local import must
     still produce a `python.import` observation, not just a resolvable call
@@ -737,9 +770,7 @@ def enqueue_push_notification(payload):
     )
 
 
-def test_function_local_import_resolves_a_constructor_call(
-    tmp_path: Path, system_id: str
-) -> None:
+def test_function_local_import_resolves_a_constructor_call(tmp_path: Path, system_id: str) -> None:
     """A function-local import feeds `_local_instance_types` too, not only
     direct calls -- `x = LocallyImportedClass()` then `x.method()` inside the
     same function must resolve through the local import, not just a call on

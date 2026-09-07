@@ -20,7 +20,13 @@ from ...core.base import SourceRef
 from ...core.enums import Origin
 from ...core.evidence import Evidence, Observation
 from ...core.ids import SystemID
-from .resolve import ResolutionContext, bindings_for_import, bindings_for_import_from, resolve_expr
+from .resolve import (
+    ResolutionContext,
+    bindings_for_import,
+    bindings_for_import_from,
+    function_local_imports,
+    resolve_expr,
+)
 
 __all__ = ["ExtractedFile", "extract_file", "module_qualified_name"]
 
@@ -138,51 +144,6 @@ def _module_level_imports(
                 walk(child)
 
     walk(module)
-    return imports
-
-
-def _function_local_imports(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, module_qn: str, *, is_package_init: bool = False
-) -> dict[str, str]:
-    """Import statements inside a function's own body -- a common idiom for
-    breaking circular imports or deferring an expensive import -- bind a name
-    only within that function's local scope, so they must be resolved (and
-    scoped) separately from `_module_level_imports`. Mirrors that function's
-    walk exactly, just rooted at `func.body` instead of the module: does not
-    descend into a nested def/class (their own imports belong to their own
-    scope), and a name bound here shadows the same name imported at module
-    level, matching real Python scoping. ``is_package_init`` -- see
-    `resolve.py`'s `_package_of` -- must be true when this file is a
-    package's own ``__init__.py``."""
-    imports: dict[str, str] = {}
-
-    def record(node: ast.Import | ast.ImportFrom) -> None:
-        if isinstance(node, ast.Import):
-            for binding in bindings_for_import(node):
-                imports[binding.bound_name] = binding.target
-        else:
-            for binding in bindings_for_import_from(
-                module_qn, node, is_package_init=is_package_init
-            ):
-                imports[binding.bound_name] = binding.target
-
-    def walk(node: ast.AST) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.Import, ast.ImportFrom)):
-                record(child)
-            elif not isinstance(child, _SCOPE_NODES):
-                walk(child)
-
-    # `func.body`'s own statements are checked directly (not just their
-    # children) so an import as the function's very first statement — the
-    # overwhelmingly common case — is actually seen; a bare `walk(stmt)` per
-    # top-level statement, mirroring `_module_level_imports`'s per-module-node
-    # call too literally, only ever inspected each statement's *children*.
-    for stmt in func.body:
-        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-            record(stmt)
-        else:
-            walk(stmt)
     return imports
 
 
@@ -476,8 +437,8 @@ class _Walker:
             line=1,
             col=0,
         )
-        for binding_kind, node in self._all_imports(tree):
-            self._emit_import(binding_kind, node)
+        for binding_kind, node, is_module_scope in self._all_imports(tree):
+            self._emit_import(binding_kind, node, is_module_scope=is_module_scope)
         for stmt, name, value in _module_level_instance_assignments(tree):
             self._emit_module_instance(stmt, name, value, ctx=base_ctx)
         self._walk_body(
@@ -488,28 +449,40 @@ class _Walker:
             caller_qualified_name=self.module_qn,
         )
 
-    def _all_imports(self, module: ast.Module) -> list[tuple[str, ast.Import | ast.ImportFrom]]:
-        """Every import statement in the file, at any nesting depth. Unlike
+    def _all_imports(
+        self, module: ast.Module
+    ) -> list[tuple[str, ast.Import | ast.ImportFrom, bool]]:
+        """Every import statement in the file, at any nesting depth, each
+        tagged with whether it sits at genuine module scope. Unlike
         `_module_level_imports`/`_function_local_imports` (which scope a name
         *binding* to the scope that can see it), an `IMPORTS` relationship is
         a module-level fact regardless of which scope triggers it — Python
         imports the target module the first time execution reaches the
-        statement, function-local or not."""
-        found: list[tuple[str, ast.Import | ast.ImportFrom]] = []
+        statement, function-local or not. The scope tag exists for a
+        different, real reason: `PythonIndex` (`adapters/_python_index.py`,
+        shared plumbing every framework enricher uses) treats a module's
+        `python.import` observations as *its own* flat import namespace —
+        without this tag, two unrelated functions in the same file locally
+        importing the same name to different targets would silently
+        overwrite each other in that shared index, a real regression a
+        wider walk here would otherwise introduce."""
+        found: list[tuple[str, ast.Import | ast.ImportFrom, bool]] = []
 
-        def walk(node: ast.AST) -> None:
+        def walk(node: ast.AST, *, module_scope: bool) -> None:
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, ast.Import):
-                    found.append(("import", child))
+                    found.append(("import", child, module_scope))
                 elif isinstance(child, ast.ImportFrom):
-                    found.append(("import_from", child))
+                    found.append(("import_from", child, module_scope))
                 else:
-                    walk(child)
+                    walk(child, module_scope=module_scope and not isinstance(child, _SCOPE_NODES))
 
-        walk(module)
+        walk(module, module_scope=True)
         return found
 
-    def _emit_import(self, kind: str, node: ast.Import | ast.ImportFrom) -> None:
+    def _emit_import(
+        self, kind: str, node: ast.Import | ast.ImportFrom, *, is_module_scope: bool
+    ) -> None:
         bindings = (
             bindings_for_import(node)
             if isinstance(node, ast.Import)
@@ -525,6 +498,7 @@ class _Walker:
                     "bound_name": binding.bound_name,
                     "target": binding.target,
                     "is_module_import": binding.is_module_import,
+                    "is_module_scope": is_module_scope,
                     "raw": raw,
                     "importer_qualified_name": self.module_qn,
                 },
@@ -675,7 +649,7 @@ class _Walker:
             line=node.lineno,
             col=node.col_offset,
         )
-        local_imports = _function_local_imports(
+        local_imports = function_local_imports(
             node, self.module_qn, is_package_init=self.is_package_init
         )
         ctx = dataclasses.replace(ctx, imports={**ctx.imports, **local_imports})

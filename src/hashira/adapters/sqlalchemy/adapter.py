@@ -161,7 +161,7 @@ from ...ports.adapters import (
     LimitationScope,
 )
 from .._python_index import PythonIndex, PythonTreeCache, find_class_node
-from ..python.resolve import ResolutionContext, resolve_expr
+from ..python.resolve import ResolutionContext, function_local_imports, resolve_expr
 from .known_symbols import (
     COLUMN_CALLABLES,
     DECLARATIVE_BASE_FACTORIES,
@@ -708,6 +708,73 @@ def _local_class_instances(
     return types
 
 
+def _self_attribute_class_instances(
+    class_node: ast.ClassDef, ctx: ResolutionContext, index: PythonIndex
+) -> dict[str, str]:
+    """`self.<attr> = SomeClass(...)` in `__init__`, resolved against *any*
+    class Python's own extraction found -- the class-scoped sibling of
+    `_local_class_instances`, closing a real, silent gap this milestone's
+    own R2 provenance matrix found: a constructor-composed dependency
+    (`self._payment = Payment()` in `__init__`, read as
+    `self._payment.status` from a *different* method) is one of the most
+    common ways a Python service object holds its own state, and was
+    invisible to field-access tracking entirely -- no access, no
+    limitation, nothing (the exact "silently looks like no relationship"
+    failure mode this project exists to refuse). Scoped to `__init__`
+    alone, matching `resolve.py`'s own `SELF_ATTRIBUTE` docstring for why
+    this stays a bounded fix rather than general attribute-flow analysis.
+    """
+    init = next(
+        (
+            node
+            for node in class_node.body
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == "__init__"
+        ),
+        None,
+    )
+    if init is None:
+        return {}
+
+    types: dict[str, str] = {}
+
+    def check(node: ast.AST) -> None:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Attribute)
+            and isinstance(node.targets[0].value, ast.Name)
+            and node.targets[0].value.id == "self"
+        ):
+            target, value = node.targets[0], node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Attribute)
+            and isinstance(node.target.value, ast.Name)
+            and node.target.value.id == "self"
+            and node.value is not None
+        ):
+            target, value = node.target, node.value
+        if target is None or not isinstance(value, ast.Call):
+            return
+        assert isinstance(target, ast.Attribute)
+        resolved = resolve_expr(value.func, ctx)
+        if resolved.qualified_name in index.class_module:
+            types[target.attr] = resolved.qualified_name
+
+    def walk(node: ast.AST) -> None:
+        check(node)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+            return
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+
+    for stmt in init.body:
+        walk(stmt)
+    return types
+
+
 def _typed_parameter_instances(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef,
     ctx: ResolutionContext,
@@ -1017,8 +1084,27 @@ def _extract_field_accesses(
         def walk(node: ast.AST) -> None:
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, ast.Attribute):
-                    base_resolved = resolve_expr(child.value, func_ctx)
-                    model_qn = base_resolved.qualified_name
+                    model_qn: str | None
+                    if (
+                        isinstance(child.value, ast.Attribute)
+                        and isinstance(child.value.value, ast.Name)
+                        and child.value.value.id == "self"
+                        and child.value.attr in func_ctx.self_attribute_types
+                    ):
+                        # `self.<attr>.<field>` -- `resolve_expr` only
+                        # promotes a `self.<x>.<y>` chain to `SELF_ATTRIBUTE`
+                        # when resolving the *whole* chain as one call target
+                        # (`self._payment.method()`); here we are resolving
+                        # only the base (`self._payment`), one hop short of
+                        # that, where `resolve_expr` instead reports plain
+                        # `SELF` (treating `_payment` as if it were itself a
+                        # symbol on the class) -- checked first, taking
+                        # priority, since a known self-attribute's *type* is
+                        # exactly what we want, not that misleading `SELF`
+                        # guess.
+                        model_qn = func_ctx.self_attribute_types[child.value.attr]
+                    else:
+                        model_qn = resolve_expr(child.value, func_ctx).qualified_name
                     fields = columns_by_model.get(model_qn) if model_qn else None
                     if fields is not None and child.attr in fields:
                         if isinstance(child.ctx, ast.Store):
@@ -1090,20 +1176,48 @@ def _extract_field_accesses(
         for stmt in body:
             walk(stmt)
 
-    def walk_body(body: list[ast.stmt], qualified_name: str) -> None:
+    def walk_body(
+        body: list[ast.stmt],
+        qualified_name: str,
+        *,
+        enclosing_class_qn: str | None = None,
+        self_attribute_types: dict[str, str] | None = None,
+    ) -> None:
         for stmt in body:
             if isinstance(stmt, ast.ClassDef):
-                walk_body(stmt.body, f"{qualified_name}.{stmt.name}")
+                class_qn = f"{qualified_name}.{stmt.name}"
+                self_types = _self_attribute_class_instances(stmt, ctx, index)
+                walk_body(
+                    stmt.body,
+                    class_qn,
+                    enclosing_class_qn=class_qn,
+                    self_attribute_types=self_types,
+                )
             elif isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
                 func_qn = f"{qualified_name}.{stmt.name}"
-                local_types = _local_class_instances(stmt, ctx, index)
-                param_types = _typed_parameter_instances(stmt, ctx, index)
+                # A function-local import (a real-repository finding, R1)
+                # must be visible to this function's own instance-type
+                # resolution -- `_local_class_instances`/
+                # `_typed_parameter_instances` otherwise never see a class
+                # imported inside the function body itself.
+                local_imports = function_local_imports(stmt, ctx.module_qualified_name)
+                scoped_ctx = ResolutionContext(
+                    module_qualified_name=ctx.module_qualified_name,
+                    imports={**ctx.imports, **local_imports},
+                    module_locals=ctx.module_locals,
+                    enclosing_class_qualified_name=enclosing_class_qn,
+                    self_attribute_types=self_attribute_types or {},
+                )
+                local_types = _local_class_instances(stmt, scoped_ctx, index)
+                param_types = _typed_parameter_instances(stmt, scoped_ctx, index)
                 base_types = {**param_types, **local_types}
                 base_ctx = ResolutionContext(
-                    module_qualified_name=ctx.module_qualified_name,
-                    imports=ctx.imports,
-                    module_locals=ctx.module_locals,
+                    module_qualified_name=scoped_ctx.module_qualified_name,
+                    imports=scoped_ctx.imports,
+                    module_locals=scoped_ctx.module_locals,
                     local_instance_types=base_types,
+                    enclosing_class_qualified_name=enclosing_class_qn,
+                    self_attribute_types=self_attribute_types or {},
                 )
                 return_types, unresolved_return_locals = _return_value_instances(
                     stmt,
@@ -1115,10 +1229,12 @@ def _extract_field_accesses(
                 )
                 instance_types = {**base_types, **return_types}
                 func_ctx = ResolutionContext(
-                    module_qualified_name=ctx.module_qualified_name,
-                    imports=ctx.imports,
-                    module_locals=ctx.module_locals,
+                    module_qualified_name=scoped_ctx.module_qualified_name,
+                    imports=scoped_ctx.imports,
+                    module_locals=scoped_ctx.module_locals,
                     local_instance_types=instance_types,
+                    enclosing_class_qualified_name=enclosing_class_qn,
+                    self_attribute_types=self_attribute_types or {},
                 )
                 all_params = {
                     arg.arg
@@ -1127,7 +1243,12 @@ def _extract_field_accesses(
                 }
                 unresolvable_params = all_params - instance_types.keys()
                 collect(stmt.body, func_qn, func_ctx, unresolvable_params, unresolved_return_locals)
-                walk_body(stmt.body, func_qn)
+                walk_body(
+                    stmt.body,
+                    func_qn,
+                    enclosing_class_qn=enclosing_class_qn,
+                    self_attribute_types=self_attribute_types,
+                )
 
     walk_body(tree.body, module_qn)
     return accesses, unresolved

@@ -41,6 +41,19 @@ class PythonIndex:
         index = cls()
         for obs in base.observations:
             if obs.kind == "python.import":
+                # `python.import` observations exist for a function-local
+                # import too (Python adapter, R1) -- but this index's own
+                # `imports` dict represents *the module's own* namespace, a
+                # contract every current consumer (Django/FastAPI/SQLAlchemy,
+                # via `context_for`) already assumes. Without this filter,
+                # two unrelated functions in the same file locally importing
+                # the same name to different targets would silently
+                # overwrite each other here. `.get(..., True)`: an older
+                # producer that never set the flag is treated as module-scope,
+                # matching every observation this adapter emitted before it
+                # existed.
+                if not bool(obs.payload.get("is_module_scope", True)):
+                    continue
                 module_qn = str(obs.payload["importer_qualified_name"])
                 index.imports.setdefault(module_qn, {})[str(obs.payload["bound_name"])] = str(
                     obs.payload["target"]

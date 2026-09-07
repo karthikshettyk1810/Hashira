@@ -1426,6 +1426,114 @@ core rather than the adapter.
     (still only observed for `IMPORTS`, not resolved for `CALLS` — same
     restraint as the milestone before this one).
 
+- [x] **Hashira 0.2 — Resolution Integrity, R2: instance & attribute
+      provenance, and a severe CLI regression** — scoped deliberately
+      narrow, per the milestone's own instruction not to build a general
+      provenance engine: four patterns (constructor instance, module
+      singleton, typed parameter, return-value instance) and their
+      cross-module/attribute-access variants, classified with a compact
+      matrix before fixing anything, matching R1's own discipline.
+  - **The corpus**: `tests/unit/test_sqlalchemy_provenance_matrix.py` (16
+    rows), the R2 companion to R1's import/call matrices — same
+    table-docstring-as-audit shape `test_sqlalchemy_coverage_matrix.py`
+    already proved out. Classification surfaced three entirely *silent*
+    gaps — worse than a disclosed `LimitationKind`, the exact "unresolved
+    looks like no relationship" failure mode this project exists to
+    refuse — and, per this milestone's own "classify first, fix the
+    highest-leverage 1–2, don't solve everything a matrix reveals"
+    instruction, two were fixed and one was deliberately left open:
+    - **Fixed: function-local import of an instance's own type.** This
+      adapter's field-access resolution builds its own, independent
+      `ResolutionContext` (never wired to the general `CALLS` resolver's
+      own R1 fix for the identical gap), so `def process(): from
+      payments.models import Payment; payment = Payment(); payment.status`
+      was invisible entirely. `function_local_imports` was promoted from
+      `adapters/python/extractor.py` to shared `adapters/python/resolve.py`
+      plumbing — the same "a second, independent adapter needs the exact
+      same thing" trigger `_python_index.py` was already extracted for —
+      and threaded into `_local_class_instances`/`_typed_parameter_instances`'s
+      own context.
+    - **Fixed: self-attribute chain (constructor-composed dependency).**
+      `self._payment = Payment()` in `__init__`, read as
+      `self._payment.status` from a *different* method — the exact shape
+      `SELF_ATTRIBUTE` (`resolve.py`) already closed for the general
+      `CALLS` resolver, with no equivalent here at all. New
+      `_self_attribute_class_instances` mirrors `_local_class_instances`'
+      own "any known class" broadening, scoped to `__init__` alone.
+      Closing this needed one subtlety `resolve_expr` itself does not
+      handle: resolving `self._payment` *alone* (the field access's own
+      base expression, one hop from `self`) always reports plain `SELF`
+      (treating `_payment` as if it were itself a class-level symbol),
+      since `SELF_ATTRIBUTE` only ever fires when resolving the *whole*
+      `self.<attr>.<method>()` chain as one call target — `collect`'s own
+      attribute-handling branch checks `self_attribute_types` directly for
+      this one-hop shape instead of routing through `resolve_expr`, kept
+      local to this adapter rather than changing the shared function's
+      contract.
+    - **Deliberately not fixed, pinned as an open-gap row**: a
+      module-level singleton *ORM instance* field access (`payment =
+      Payment()` at module scope) — a real gap, but a far rarer real-world
+      shape than the general resolver's own service/client singleton fix
+      (an ORM row is not usually a process-wide singleton) — and
+      `getattr(self._payment, "status")`, silently dropped because
+      `_check_dynamic_attribute_call`'s own guard requires a bare
+      `ast.Name` base, never considering an `ast.Attribute` one regardless
+      of whether the literal field name matches.
+  - **A severe, independent bug found by the real-repository verification
+    step, not the matrix**: re-indexing the read-only Rider benchmark
+    after the matrix fixes landed showed the exact same relationship count
+    as before them — a red flag, since the benchmark is a Django project,
+    and `entities`/`relationships` upserted had *zero* Django-specific
+    contribution of any kind (no `INTERFACE` for a route, no model
+    tagging, no `EXPOSES`, no field `READS`/`WRITES`) despite `DjangoAdapter`
+    being correctly wired into `framework_adapters`. Root cause, in
+    `cli/main.py::_run_index`: `compose_normalizers(enrich_fastapi,
+    enrich_sqlalchemy)` — **`DjangoAdapter`'s own `enrich_normalized_run`
+    was never included.** `DjangoAdapter().enrich()` ran and produced real
+    `django.*` observations exactly as documented; the composed normalizer
+    that turns observations into actual `Entity`/`Relationship` records
+    simply never knew Django's enricher existed, so every one of those
+    observations was silently discarded before ever reaching storage —
+    **every `hashira index` run against a real Django project, via the
+    actual shipped CLI, has been producing a Python-only graph with zero
+    Django framework intelligence**, no error, no warning, looking exactly
+    like a complete, successful index. `tests/unit/test_cli_main.py`'s own
+    CLI-level Django coverage was zero (its `project` fixture is
+    deliberately plain Python) — the lower-level `IndexingService` API
+    other tests exercise directly was never actually exposed to this gap,
+    which is exactly why unit tests alone missed it and only the real,
+    read-only benchmark loop caught it. Fixed with one line
+    (`compose_normalizers(enrich_django, enrich_fastapi, enrich_sqlalchemy)`),
+    plus a new regression test (`django_project` fixture, a real
+    `models.Model` + a service reading/writing a field) that fails without
+    the fix — confirmed by reverting it and re-running, not assumed.
+  - **A second real crash, found only once Django's normalizer actually
+    ran for the first time on a large codebase**: `path("", ...)` — an
+    empty route matching a urlconf's own root, idiomatic Django every
+    `include()`d app typically has one of — crashed the *entire* indexing
+    run (`Entity(name="")`, the identical failure shape the R1 milestone's
+    `module_qualified_name` fix already closed once, now recurring in
+    Django's own URL-route entity minting). Fixed the same way: `name=route
+    or "/"` — "/" is the conventional way this route is actually written
+    and discussed, not a fabricated label; `route_qn`/`metadata["url_name"]`
+    carry the real, unmodified route string regardless.
+  - **Re-verified against the real-repository benchmark, twice — once
+    per crash, never modifying the benchmark itself**: entities went
+    2529 → 2630, relationships 5498 → 5585, and the graph now contains 86
+    real `INTERFACE` route entities, 82 view-tagged symbols, and 72
+    `EXPOSES` edges that did not exist in any indexing run before this
+    milestone, on the same unmodified Django codebase. `payment.status`-style
+    field `READS`/`WRITES` remained at zero even after the fix — logged as
+    an open question (how many real local-instantiation-style field
+    accesses this specific codebase's Django ORM usage actually contains
+    is unconfirmed, not assumed to be a further bug) rather than chased
+    further in this pass.
+  - **Not attempted in this pass**: R3 (dynamic/reflection boundary —
+    `getattr`/`setattr`/dynamic dispatch/framework reflection/decorator-
+    generated behavior/string-based registries, detect-and-disclose rather
+    than resolve), a second, differently-shaped real-repository benchmark,
+    and either open gap pinned above.
+
 - [x] **PyPI distribution, 0.1.0a1 then 0.1.0a2** — the first time this
       project's own installability, not just its behavior against a real
       target repository, became the thing under test. `0.1.0a1`: version

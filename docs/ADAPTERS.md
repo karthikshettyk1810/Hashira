@@ -704,6 +704,25 @@ inference" was explicitly out of scope; only a column's direct
 `ForeignKey(...)` argument is read), and multi-hop `ForeignKey` chains
 beyond a direct string reference.
 
+**Resolution Integrity R2: instance & attribute provenance.** A compact
+matrix (`tests/unit/test_sqlalchemy_provenance_matrix.py`) found this
+adapter's own field-access resolution builds a completely independent
+`ResolutionContext` from the general Python `CALLS` resolver — so two gaps
+R1 had already closed there (function-local imports, a constructor-composed
+`self.<attr>` dependency) were silently open here too. Both fixed:
+`function_local_imports` was promoted to shared `resolve.py` plumbing (the
+same "a second adapter needs the exact same thing" trigger `_python_index.py`
+was extracted for), and a new `_self_attribute_class_instances` mirrors
+`_local_class_instances`' own broadening, scoped to `__init__`. A
+module-level singleton ORM instance and `getattr(self._x, "field")` are
+pinned as deliberately-unfixed open-gap rows — a much rarer real-world
+shape and a narrow guard-clause gap respectively; see `docs/ROADMAP.md`'s
+"Resolution Integrity R2" entry for the full account, including a far more
+severe bug the real-repository verification step (not the matrix) found:
+`cli/main.py`'s own `compose_normalizers` call never included Django's
+enricher at all, silently discarding every Django-specific relationship
+`hashira index` ever produced.
+
 ## Next adapter target (per the MVP scope decision in ARCHITECTURE.md)
 
 Having proven cross-framework equivalence with a second `FrameworkAdapter`

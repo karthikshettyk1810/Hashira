@@ -128,6 +128,39 @@ def test_route_exposes_the_resolved_view(tmp_path: Path, system_id: str) -> None
     assert any(r.target_entity_id == view.id for r in exposes)
 
 
+def test_empty_route_does_not_crash_and_gets_a_real_display_name(
+    tmp_path: Path, system_id: str
+) -> None:
+    """`path("", ...)` -- an empty route matching a urlconf's own root, an
+    idiomatic Django pattern every `include()`d app typically has one of --
+    is a real crash a real Django project surfaced: `Entity.name` requires
+    at least one character, and the route's own raw match string *is* the
+    empty string. `route_qn`/`metadata["url_name"]` still carry the real,
+    unmodified data; only the display `name` falls back to "/" -- the
+    conventional way this route is actually written and discussed, never a
+    fabricated label."""
+    _write(
+        tmp_path,
+        "payments/views.py",
+        "from django.views import View\n\n\nclass IndexView(View):\n"
+        "    def get(self, request):\n        pass\n",
+    )
+    _write(
+        tmp_path,
+        "payments/urls.py",
+        "from django.urls import path\n\nfrom .views import IndexView\n\n"
+        "urlpatterns = [\n"
+        '    path("", IndexView.as_view(), name="index"),\n'
+        "]\n",
+    )
+    run = _run(tmp_path, system_id)
+    by_qn = {e.qualified_name: e for e in run.entities}
+
+    route = by_qn["payments.urls:"]
+    assert route.name == "/"
+    assert route.metadata["url_name"] == "index"
+
+
 def test_field_access_produces_reads_and_writes(tmp_path: Path, system_id: str) -> None:
     _minimal_project(tmp_path)
     run = _run(tmp_path, system_id)

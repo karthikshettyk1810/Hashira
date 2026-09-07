@@ -22,8 +22,10 @@ from mcp import ClientSession
 from mcp.client._memory import InMemoryTransport
 from mcp.server.mcpserver import MCPServer
 
+from hashira.application.graph import get_relationships
 from hashira.cli.main import _run_index, _run_mcp, _slugify, build_parser, main
 from hashira.core import System
+from hashira.core.enums import RelationshipType
 from hashira.storage.sqlite import SqliteDatabase
 
 
@@ -181,6 +183,73 @@ def test_run_index_indexes_a_real_project_into_the_default_db(
         assert system is not None
         entities = uow.graph.find_entities(system.id, limit=100)
         assert any(e.qualified_name == "app.payments.PaymentService" for e in entities)
+
+
+@pytest.fixture
+def django_project(tmp_path: Path) -> Path:
+    """A minimal, real Django-shaped project (`models.Model`, a service
+    reading/writing a model field) -- catches a real regression: `hashira
+    index`'s own normalizer composition silently dropped every
+    Django-specific entity and relationship even though `DjangoAdapter` was
+    correctly wired into extraction; see `_run_index`'s own
+    `compose_normalizers` call."""
+    root = tmp_path / "djproject"
+    (root / "payments").mkdir(parents=True)
+    (root / "payments" / "__init__.py").write_text("")
+    (root / "payments" / "models.py").write_text(
+        "from django.db import models\n\n\n"
+        "class Payment(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n"
+    )
+    (root / "payments" / "services.py").write_text(
+        "from .models import Payment\n\n\n"
+        "def process():\n"
+        "    payment = Payment()\n"
+        '    payment.status = "captured"\n'
+        "    return payment.status\n"
+    )
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "initial commit")
+    return root
+
+
+def test_run_index_produces_django_specific_entities_and_relationships(
+    django_project: Path,
+) -> None:
+    """The regression: `DjangoAdapter` was wired into `framework_adapters`
+    (so its own `enrich()` extraction ran, producing real `django.*`
+    observations) but never into `compose_normalizers` -- so every one of
+    those observations was silently discarded before becoming a real
+    `Entity`/`Relationship`. A model tagged `django_kind` and a real
+    `WRITES` edge are the minimal, real signal that Django's own normalizer
+    actually ran as part of `hashira index`, not just as part of the
+    lower-level `IndexingService` API other tests already exercise
+    directly."""
+    exit_code = _run_index(_index_args([str(django_project)]))
+    assert exit_code == 0
+
+    db_path = django_project / ".hashira" / "hashira.db"
+    db = SqliteDatabase(str(db_path))
+    with db.unit_of_work() as uow:
+        system = uow.systems.get_by_slug("djproject")
+        assert system is not None
+        entities = {e.qualified_name: e for e in uow.graph.find_entities(system.id, limit=100)}
+
+        model = entities["payments.models.Payment"]
+        assert model.metadata.get("django_kind") == "model"
+
+        process = entities["payments.services.process"]
+        writes = get_relationships(
+            uow,
+            system_id=system.id,
+            entity_id=process.id,
+            direction="out",
+            types=[RelationshipType.WRITES],
+        )
+        assert len(writes) == 1
 
 
 def test_run_index_reports_a_clean_error_for_a_missing_project_root(

@@ -133,7 +133,14 @@ def enrich_normalized_run(
         route_entity = Entity(
             system_id=system_id,
             type=EntityType.INTERFACE,
-            name=route,
+            # `path("", ...)` -- an empty route matching a urlconf's own
+            # root, idiomatic Django (every `include()`d app typically has
+            # one) -- is a real crash a real Django project surfaced:
+            # `Entity.name` requires at least one character.  "/" is the
+            # conventional, real way this route is actually written and
+            # discussed (never a fabricated label) -- `route_qn`/`metadata`
+            # below still carry the raw, possibly-empty `route` unchanged.
+            name=route or "/",
             qualified_name=route_qn,
             source=SourceLocation(
                 file=_module_file(by_qn, urls_module_qn),
