@@ -1,0 +1,852 @@
+{
+  "entities": {
+    "main": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "main"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "main.py::main::module"
+        }
+      ],
+      "name": "main",
+      "qualified_name": "main",
+      "type": "MODULE"
+    },
+    "payments": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/db_models.py::payments::sqlalchemy_table"
+        }
+      ],
+      "name": "payments",
+      "qualified_name": "payments",
+      "type": "DATA_ENTITY"
+    },
+    "payments.db_models": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.db_models"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/db_models.py::payments.db_models::module"
+        }
+      ],
+      "name": "db_models",
+      "qualified_name": "payments.db_models",
+      "type": "MODULE"
+    },
+    "payments.db_models.Payment": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.db_models.Payment"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/db_models.py::payments.db_models.Payment::class"
+        }
+      ],
+      "name": "Payment",
+      "qualified_name": "payments.db_models.Payment",
+      "type": "SYMBOL"
+    },
+    "payments.dependencies": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.dependencies"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/dependencies.py::payments.dependencies::module"
+        }
+      ],
+      "name": "dependencies",
+      "qualified_name": "payments.dependencies",
+      "type": "MODULE"
+    },
+    "payments.dependencies.CurrentUser": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.dependencies.CurrentUser"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/dependencies.py::payments.dependencies.CurrentUser::class"
+        }
+      ],
+      "name": "CurrentUser",
+      "qualified_name": "payments.dependencies.CurrentUser",
+      "type": "SYMBOL"
+    },
+    "payments.dependencies.CurrentUser.__init__": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.dependencies.CurrentUser.__init__"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/dependencies.py::payments.dependencies.CurrentUser.__init__::method"
+        }
+      ],
+      "name": "__init__",
+      "qualified_name": "payments.dependencies.CurrentUser.__init__",
+      "type": "SYMBOL"
+    },
+    "payments.dependencies.get_current_user": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.dependencies.get_current_user"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/dependencies.py::payments.dependencies.get_current_user::function"
+        }
+      ],
+      "name": "get_current_user",
+      "qualified_name": "payments.dependencies.get_current_user",
+      "type": "SYMBOL"
+    },
+    "payments.id": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.id"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/db_models.py::payments.id::sqlalchemy_column"
+        }
+      ],
+      "name": "id",
+      "qualified_name": "payments.id",
+      "type": "SYMBOL"
+    },
+    "payments.reporting": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.reporting"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/reporting.py::payments.reporting::module"
+        }
+      ],
+      "name": "reporting",
+      "qualified_name": "payments.reporting",
+      "type": "MODULE"
+    },
+    "payments.reporting.count_pending": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.reporting.count_pending"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/reporting.py::payments.reporting.count_pending::function"
+        }
+      ],
+      "name": "count_pending",
+      "qualified_name": "payments.reporting.count_pending",
+      "type": "SYMBOL"
+    },
+    "payments.routers": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.routers"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/routers.py::payments.routers::module"
+        }
+      ],
+      "name": "routers",
+      "qualified_name": "payments.routers",
+      "type": "MODULE"
+    },
+    "payments.routers.checkout": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.routers.checkout"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/routers.py::payments.routers.checkout::function"
+        }
+      ],
+      "name": "checkout",
+      "qualified_name": "payments.routers.checkout",
+      "type": "SYMBOL"
+    },
+    "payments.routers.me": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.routers.me"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/routers.py::payments.routers.me::function"
+        }
+      ],
+      "name": "me",
+      "qualified_name": "payments.routers.me",
+      "type": "SYMBOL"
+    },
+    "payments.routers.router:GET /payments/me": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.routers.router:GET /payments/me"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/routers.py::payments.routers.router:GET /payments/me::fastapi_route"
+        }
+      ],
+      "name": "GET /payments/me",
+      "qualified_name": "payments.routers.router:GET /payments/me",
+      "type": "INTERFACE"
+    },
+    "payments.routers.router:POST /payments/checkout/": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.routers.router:POST /payments/checkout/"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/routers.py::payments.routers.router:POST /payments/checkout/::fastapi_route"
+        }
+      ],
+      "name": "POST /payments/checkout/",
+      "qualified_name": "payments.routers.router:POST /payments/checkout/",
+      "type": "INTERFACE"
+    },
+    "payments.schemas": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.schemas"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/schemas.py::payments.schemas::module"
+        }
+      ],
+      "name": "schemas",
+      "qualified_name": "payments.schemas",
+      "type": "MODULE"
+    },
+    "payments.schemas.PaymentRequest": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.schemas.PaymentRequest"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/schemas.py::payments.schemas.PaymentRequest::class"
+        }
+      ],
+      "name": "PaymentRequest",
+      "qualified_name": "payments.schemas.PaymentRequest",
+      "type": "SYMBOL"
+    },
+    "payments.schemas.PaymentResponse": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.schemas.PaymentResponse"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/schemas.py::payments.schemas.PaymentResponse::class"
+        }
+      ],
+      "name": "PaymentResponse",
+      "qualified_name": "payments.schemas.PaymentResponse",
+      "type": "SYMBOL"
+    },
+    "payments.services": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.services"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/services.py::payments.services::module"
+        }
+      ],
+      "name": "services",
+      "qualified_name": "payments.services",
+      "type": "MODULE"
+    },
+    "payments.services.PaymentService": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.services.PaymentService"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/services.py::payments.services.PaymentService::class"
+        }
+      ],
+      "name": "PaymentService",
+      "qualified_name": "payments.services.PaymentService",
+      "type": "SYMBOL"
+    },
+    "payments.services.PaymentService.mark_refunded": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.services.PaymentService.mark_refunded"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/services.py::payments.services.PaymentService.mark_refunded::method"
+        }
+      ],
+      "name": "mark_refunded",
+      "qualified_name": "payments.services.PaymentService.mark_refunded",
+      "type": "SYMBOL"
+    },
+    "payments.services.PaymentService.process": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.services.PaymentService.process"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/services.py::payments.services.PaymentService.process::method"
+        }
+      ],
+      "name": "process",
+      "qualified_name": "payments.services.PaymentService.process",
+      "type": "SYMBOL"
+    },
+    "payments.status": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.status"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/db_models.py::payments.status::sqlalchemy_column"
+        }
+      ],
+      "name": "status",
+      "qualified_name": "payments.status",
+      "type": "SYMBOL"
+    },
+    "payments.tests": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.tests"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/tests/__init__.py::payments.tests::module"
+        }
+      ],
+      "name": "tests",
+      "qualified_name": "payments.tests",
+      "type": "MODULE"
+    },
+    "payments.tests.test_checkout": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.tests.test_checkout"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/tests/test_checkout.py::payments.tests.test_checkout::module"
+        }
+      ],
+      "name": "test_checkout",
+      "qualified_name": "payments.tests.test_checkout",
+      "type": "MODULE"
+    },
+    "payments.tests.test_checkout.TestCheckout": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.tests.test_checkout.TestCheckout"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/tests/test_checkout.py::payments.tests.test_checkout.TestCheckout::class"
+        }
+      ],
+      "name": "TestCheckout",
+      "qualified_name": "payments.tests.test_checkout.TestCheckout",
+      "type": "SYMBOL"
+    },
+    "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured": {
+      "identity_claims": [
+        {
+          "confidence": "CERTAIN",
+          "kind": "QUALIFIED_NAME",
+          "origin": "PARSER",
+          "value": "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured"
+        },
+        {
+          "confidence": "CERTAIN",
+          "kind": "DECLARATION_ANCHOR",
+          "origin": "PARSER",
+          "value": "payments/tests/test_checkout.py::payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured::method"
+        }
+      ],
+      "name": "test_process_marks_payment_captured",
+      "qualified_name": "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured",
+      "type": "SYMBOL"
+    }
+  },
+  "entity_count": 28,
+  "evidence_locations": {
+    "main": [
+      "main.py:0"
+    ],
+    "payments": [
+      "payments/__init__.py:0",
+      "payments/db_models.py:7"
+    ],
+    "payments.db_models": [
+      "payments/db_models.py:0"
+    ],
+    "payments.db_models.Payment": [
+      "payments/db_models.py:7"
+    ],
+    "payments.dependencies": [
+      "payments/dependencies.py:0"
+    ],
+    "payments.dependencies.CurrentUser": [
+      "payments/dependencies.py:1"
+    ],
+    "payments.dependencies.CurrentUser.__init__": [
+      "payments/dependencies.py:2"
+    ],
+    "payments.dependencies.get_current_user": [
+      "payments/dependencies.py:6"
+    ],
+    "payments.id": [
+      "payments/db_models.py:7"
+    ],
+    "payments.reporting": [
+      "payments/reporting.py:0"
+    ],
+    "payments.reporting.count_pending": [
+      "payments/reporting.py:4"
+    ],
+    "payments.routers": [
+      "payments/routers.py:0"
+    ],
+    "payments.routers.checkout": [
+      "payments/routers.py:11"
+    ],
+    "payments.routers.me": [
+      "payments/routers.py:18"
+    ],
+    "payments.routers.router:GET /payments/me": [
+      "payments/routers.py:18"
+    ],
+    "payments.routers.router:POST /payments/checkout/": [
+      "payments/routers.py:11"
+    ],
+    "payments.schemas": [
+      "payments/schemas.py:0"
+    ],
+    "payments.schemas.PaymentRequest": [
+      "payments/schemas.py:4"
+    ],
+    "payments.schemas.PaymentResponse": [
+      "payments/schemas.py:8"
+    ],
+    "payments.services": [
+      "payments/services.py:0"
+    ],
+    "payments.services.PaymentService": [
+      "payments/services.py:4"
+    ],
+    "payments.services.PaymentService.mark_refunded": [
+      "payments/services.py:12"
+    ],
+    "payments.services.PaymentService.process": [
+      "payments/services.py:5"
+    ],
+    "payments.status": [
+      "payments/db_models.py:7"
+    ],
+    "payments.tests": [
+      "payments/tests/__init__.py:0"
+    ],
+    "payments.tests.test_checkout": [
+      "payments/tests/test_checkout.py:0"
+    ],
+    "payments.tests.test_checkout.TestCheckout": [
+      "payments/tests/test_checkout.py:4"
+    ],
+    "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured": [
+      "payments/tests/test_checkout.py:5"
+    ]
+  },
+  "lineages": [],
+  "relationship_count": 37,
+  "relationships": [
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments",
+      "target_qname": "payments.id",
+      "type": "CONTAINS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments",
+      "target_qname": "payments.status",
+      "type": "CONTAINS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.db_models",
+      "target_qname": "payments.db_models.Payment",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.db_models.Payment",
+      "target_qname": "payments",
+      "type": "MAPS_TO"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.dependencies",
+      "target_qname": "payments.dependencies.CurrentUser",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.dependencies",
+      "target_qname": "payments.dependencies.get_current_user",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.dependencies.CurrentUser",
+      "target_qname": "payments.dependencies.CurrentUser.__init__",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.dependencies.get_current_user",
+      "target_qname": "payments.dependencies.CurrentUser",
+      "type": "CALLS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.reporting",
+      "target_qname": "payments.reporting.count_pending",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers",
+      "target_qname": "payments.dependencies.get_current_user",
+      "type": "IMPORTS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers",
+      "target_qname": "payments.routers.checkout",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers",
+      "target_qname": "payments.routers.me",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers",
+      "target_qname": "payments.schemas.PaymentRequest",
+      "type": "IMPORTS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers",
+      "target_qname": "payments.schemas.PaymentResponse",
+      "type": "IMPORTS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers",
+      "target_qname": "payments.services.PaymentService",
+      "type": "IMPORTS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers.checkout",
+      "target_qname": "payments.schemas.PaymentResponse",
+      "type": "CALLS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers.checkout",
+      "target_qname": "payments.services.PaymentService",
+      "type": "CALLS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers.checkout",
+      "target_qname": "payments.services.PaymentService.process",
+      "type": "CALLS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers.me",
+      "target_qname": "payments.dependencies.get_current_user",
+      "type": "DEPENDS_ON"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers.router:GET /payments/me",
+      "target_qname": "payments.routers.me",
+      "type": "EXPOSES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.routers.router:POST /payments/checkout/",
+      "target_qname": "payments.routers.checkout",
+      "type": "EXPOSES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.schemas",
+      "target_qname": "payments.schemas.PaymentRequest",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.schemas",
+      "target_qname": "payments.schemas.PaymentResponse",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.services",
+      "target_qname": "payments.db_models.Payment",
+      "type": "IMPORTS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.services",
+      "target_qname": "payments.services.PaymentService",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.services.PaymentService",
+      "target_qname": "payments.services.PaymentService.mark_refunded",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.services.PaymentService",
+      "target_qname": "payments.services.PaymentService.process",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.services.PaymentService.mark_refunded",
+      "target_qname": "payments.status",
+      "type": "READS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.services.PaymentService.mark_refunded",
+      "target_qname": "payments.status",
+      "type": "WRITES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.services.PaymentService.process",
+      "target_qname": "payments.db_models.Payment",
+      "type": "CALLS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.services.PaymentService.process",
+      "target_qname": "payments.status",
+      "type": "READS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.services.PaymentService.process",
+      "target_qname": "payments.status",
+      "type": "WRITES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.tests.test_checkout",
+      "target_qname": "payments.services.PaymentService",
+      "type": "IMPORTS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.tests.test_checkout",
+      "target_qname": "payments.tests.test_checkout.TestCheckout",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.tests.test_checkout.TestCheckout",
+      "target_qname": "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured",
+      "type": "DEFINES"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured",
+      "target_qname": "payments.services.PaymentService",
+      "type": "CALLS"
+    },
+    {
+      "confidence": "CERTAIN",
+      "source_qname": "payments.tests.test_checkout.TestCheckout.test_process_marks_payment_captured",
+      "target_qname": "payments.services.PaymentService.process",
+      "type": "CALLS"
+    }
+  ],
+  "revision": "53be9ece04e02d46595dd7cf49f8948e080c6aa3",
+  "stage": "C0"
+}
