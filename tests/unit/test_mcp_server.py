@@ -112,7 +112,7 @@ def _run(coro: object) -> object:
     return asyncio.run(coro)  # type: ignore[arg-type]
 
 
-def test_list_tools_exposes_all_eight(server: MCPServer) -> None:
+def test_list_tools_exposes_all_nine(server: MCPServer) -> None:
     async def scenario() -> set[str]:
         async with _session(server) as session:
             result = await session.list_tools()
@@ -122,6 +122,7 @@ def test_list_tools_exposes_all_eight(server: MCPServer) -> None:
 
     assert names == {
         "get_entity",
+        "get_entity_neighborhood",
         "get_relationships",
         "query_at_revision",
         "reverse_impact",
@@ -130,6 +131,58 @@ def test_list_tools_exposes_all_eight(server: MCPServer) -> None:
         "follow_lineage",
         "search_entities",
     }
+
+
+def test_get_entity_neighborhood_round_trip(
+    db: MemoryDatabase, system: System, server: MCPServer
+) -> None:
+    source = _entity_at(system, "CheckoutView", "app/views.py")
+    target = _entity_at(system, "Payment.status", "app/models.py")
+    ev = _evidence(system)
+    rel = _rel(system, source, target, RelationshipType.READS, ev)
+    with db.unit_of_work() as uow:
+        uow.graph.upsert_entities([source, target])
+        uow.graph.upsert_relationships([rel])
+        uow.evidence.record([ev])
+        uow.commit()
+
+    async def scenario() -> dict[str, object]:
+        async with _session(server) as session:
+            result = await session.call_tool(
+                "get_entity_neighborhood", {"entity_id": target.id}
+            )
+            assert not result.is_error
+            assert result.structured_content is not None
+            return result.structured_content
+
+    payload = _run(scenario())
+
+    assert payload["found"] is True
+    assert payload["target"]["id"] == target.id  # type: ignore[index]
+    assert payload["target"]["name"] == "Payment.status"  # type: ignore[index]
+    assert payload["coverage"]["status"] == "COMPLETE"  # type: ignore[index]
+    assert len(payload["incoming"]) == 1  # type: ignore[index,arg-type]
+    incoming_edge = payload["incoming"][0]  # type: ignore[index]
+    assert incoming_edge["relationship_id"] == rel.id
+    assert incoming_edge["type"] == "READS"
+    assert incoming_edge["confidence"] == "CERTAIN"
+    assert incoming_edge["entity"]["id"] == source.id
+    assert incoming_edge["entity"]["name"] == "CheckoutView"
+    assert len(incoming_edge["evidence"]) == 1
+    assert incoming_edge["evidence"][0]["source"] == "app.py"
+
+
+def test_get_entity_neighborhood_unknown_id(server: MCPServer) -> None:
+    async def scenario() -> dict[str, object]:
+        async with _session(server) as session:
+            result = await session.call_tool(
+                "get_entity_neighborhood", {"entity_id": "ent_nope"}
+            )
+            assert result.structured_content is not None
+            return result.structured_content
+
+    payload = _run(scenario())
+    assert payload["found"] is False
 
 
 def test_get_entity_round_trip(db: MemoryDatabase, system: System, server: MCPServer) -> None:
@@ -303,6 +356,11 @@ def test_summarize_impact_groups_and_traces_back_to_reverse_impact(
     assert summary_payload["path_count"] == 3
     assert "coverage" in summary_payload
     assert summary_payload["coverage"] == full_payload["coverage"]
+    assert summary_payload["target"]["id"] == status.id  # type: ignore[index]
+    assert summary_payload["target"]["name"] == "Payment.status"  # type: ignore[index]
+    assert len(summary_payload["writers"]) == 2  # type: ignore[index,arg-type]
+    assert len(summary_payload["readers"]) == 1  # type: ignore[index,arg-type]
+    assert len(summary_payload["direct_callers"]) == 0  # type: ignore[index,arg-type]
 
     groups = summary_payload["groups"]
     keys = {g["key"] for g in groups}  # type: ignore[union-attr]

@@ -12,18 +12,20 @@ graph, decides an identity outcome, or touches storage/adapter internals
 directly -- if a tool needed to do any of that, the right fix is a new
 `application/` function, not more logic in this file.
 
-**Eight tools, matching the milestone's own scope**: `get_entity`,
-`get_relationships`, `query_at_revision`, `reverse_impact`, `forward_impact`,
-`summarize_impact`, `follow_lineage`, and `search_entities` (discovery, not
-identity -- see `application/search.py`'s own docstring on why it is
-deliberately the only name-based tool here). A typical agent flow chains
-them: `search_entities` to find an id, `reverse_impact`/`forward_impact` to
-see what that id touches, `summarize_impact` to turn a large result into a
-navigable projection (grouped, deduplicated, coverage still up front --
-`application/impact.py`'s "Impact Presentation v0.1" entry) before deciding
-where to look closer, `get_entity`/`get_relationships` to inspect one node
-or edge in full, `query_at_revision` to see the same shape at a different
-point in history, `follow_lineage` to cross a rename.
+**Nine tools, matching the milestone's own scope**: `get_entity`,
+`get_entity_neighborhood`, `get_relationships`, `query_at_revision`,
+`reverse_impact`, `forward_impact`, `summarize_impact`, `follow_lineage`,
+and `search_entities` (discovery, not identity -- see `application/search.py`'s
+own docstring on why it is deliberately the only name-based tool here). A typical
+agent flow chains them: `search_entities` to find an id, `get_entity_neighborhood`
+to immediately inspect a node's immediate semantic environment (incoming/outgoing
+edges with compact endpoints, confidence, evidence, coverage),
+`summarize_impact` to turn a large impact traversal into a semantically categorized
+projection (direct callers, readers, writers, indirect dependencies, framework
+boundaries, directory groups) before deciding where to look closer,
+`get_entity`/`get_relationships` to inspect one node or edge in full,
+`query_at_revision` to see the same shape at a different point in history,
+`follow_lineage` to cross a rename.
 
 `summarize_impact` is deliberately a separate tool from `reverse_impact`/
 `forward_impact`, not a mode flag on them: `reverse_impact`/`forward_impact`
@@ -105,6 +107,31 @@ def build_server(
         if entity is None:
             return {"found": False, "entity_id": entity_id}
         return {"found": True, "entity": serialize.serialize_entity(entity)}
+
+    @server.tool()
+    def get_entity_neighborhood(
+        entity_id: str,
+        revision: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the 1-hop semantic neighborhood of `entity_id`: its own
+        compact identity, incoming and outgoing relationships with compact
+        endpoint entities (name, qualified name, type), edge confidence,
+        compact evidence references (source file, line), and coverage status.
+
+        Always inspect `coverage` before treating connected edges as exhaustive;
+        PARTIAL coverage means known blind spots exist. Use this tool to
+        inspect an entity's immediate environment in one call without needing
+        separate get_entity calls for every neighbor."""
+        with uow_factory() as uow:
+            neighborhood = graph_queries.get_entity_neighborhood(
+                uow,
+                system_id=system_id,
+                entity_id=entity_id,
+                revision=revision,
+            )
+        if neighborhood is None:
+            return {"found": False, "entity_id": entity_id, "revision": revision}
+        return {"found": True, **serialize.serialize_entity_neighborhood(neighborhood)}
 
     @server.tool()
     def get_relationships(
@@ -236,25 +263,20 @@ def build_server(
         revision: str | None = None,
         edge_types: list[str] | None = None,
     ) -> dict[str, Any]:
-        """The navigable projection of `reverse_impact`/`forward_impact`:
+        """The agent-native compact projection of `reverse_impact`/`forward_impact`:
         same underlying analysis, computed the same way (`direction` selects
         which -- "reverse" for what depends on `entity_id`, "forward" for
-        what it depends on), but grouped by the affected entities' own
-        source-directory structure and deduplicated to bare ids instead of a
-        flat list of fully-materialized paths. Use this first on a result
-        you expect to be large; `get_entity`/`get_relationships` remain the
-        way to inspect any specific entity or edge this surfaces in full.
+        what it depends on), categorized semantically by edge role:
+        `direct_callers`, `direct_callees`, `readers`, `writers`,
+        `framework_boundaries`, and `indirect_dependencies`, alongside directory
+        level `groups`.
 
-        `coverage` is unchanged from the underlying result and still comes
-        first in the response -- check it before treating `groups` as
-        exhaustive, exactly as for `reverse_impact`/`forward_impact`.
-        `groups` are ordered by `entity_count` descending only; that is not
-        a relevance ranking, so decide what matters from the graph
-        structure `key` (a directory) and `path_count`/`entity_count`
-        expose, not from position in the list. Every `entity_id` named
-        anywhere in `groups` is a real id from the underlying
-        `reverse_impact`/`forward_impact` result, unchanged -- nothing here
-        is inferred, only grouped, counted, and referenced."""
+        `coverage` is carried through verbatim and placed first in the
+        response -- check `coverage.status` ("COMPLETE" vs "PARTIAL") and
+        `coverage.limitations` before treating results as exhaustive.
+
+        Each categorized item includes compact entity identity, relationship ID,
+        relationship type, confidence, and source location evidence."""
         if direction not in ("reverse", "forward"):
             return {"error": f"direction must be 'reverse' or 'forward', got {direction!r}"}
         try:

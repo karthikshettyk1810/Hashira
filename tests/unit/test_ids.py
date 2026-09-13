@@ -16,8 +16,13 @@ def test_new_id_carries_its_prefix() -> None:
 
 
 def test_ulids_are_lexicographically_time_ordered() -> None:
-    values = [new_ulid() for _ in range(200)]
-    assert values == sorted(values) or len(set(v[:10] for v in values)) > 1
+    import os
+
+    from hashira.core.ids import _encode_ulid
+
+    timestamps = [1_700_000_000_000 + (i * 10) for i in range(50)]
+    values = [_encode_ulid(ts, os.urandom(10)) for ts in timestamps]
+    assert values == sorted(values)
 
 
 def test_ulids_are_unique() -> None:

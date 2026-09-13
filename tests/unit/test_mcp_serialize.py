@@ -169,3 +169,107 @@ def test_serialize_historical_graph() -> None:
     assert dumped["revision"] == "deadbeef"
     assert [e["id"] for e in dumped["entities"]] == [a.id, b.id]
     assert dumped["relationships"][0]["id"] == rel.id
+
+
+def test_serialize_entity_neighborhood() -> None:
+    from hashira.application.graph import (
+        CompactEntityRef,
+        CompactEvidenceRef,
+        CompactNeighborEdge,
+        EntityNeighborhood,
+    )
+    from hashira.mcp.serialize import serialize_entity_neighborhood
+
+    target = CompactEntityRef(
+        id="ent_1", name="status", qualified_name="Payment.status", type="SYMBOL"
+    )
+    caller = CompactEntityRef(
+        id="ent_2", name="checkout", qualified_name="CheckoutView", type="SYMBOL"
+    )
+    ev_ref = CompactEvidenceRef(source="views.py", line="12", summary="reads status")
+    edge = CompactNeighborEdge(
+        relationship_id="rel_1",
+        type="READS",
+        confidence="CERTAIN",
+        entity=caller,
+        evidence=(ev_ref,),
+    )
+    coverage = ImpactCoverage(status=CoverageStatus.COMPLETE, limitations=())
+    neighborhood = EntityNeighborhood(
+        entity=target,
+        coverage=coverage,
+        revision=None,
+        incoming=(edge,),
+        outgoing=(),
+    )
+
+    dumped = serialize_entity_neighborhood(neighborhood)
+
+    assert dumped["coverage"]["status"] == "COMPLETE"
+    assert dumped["target"]["id"] == "ent_1"
+    assert dumped["target"]["qualified_name"] == "Payment.status"
+    assert len(dumped["incoming"]) == 1
+    assert dumped["incoming"][0]["relationship_id"] == "rel_1"
+    assert dumped["incoming"][0]["type"] == "READS"
+    assert dumped["incoming"][0]["confidence"] == "CERTAIN"
+    assert dumped["incoming"][0]["entity"]["id"] == "ent_2"
+    assert dumped["incoming"][0]["evidence"][0]["source"] == "views.py"
+    assert dumped["outgoing"] == []
+
+
+def test_serialize_impact_summary() -> None:
+    from hashira.application.graph import CompactEntityRef, CompactEvidenceRef
+    from hashira.application.impact import ImpactGroup, ImpactSummary, SemanticImpactItem
+    from hashira.mcp.serialize import serialize_impact_summary
+
+    target = CompactEntityRef(
+        id="ent_1", name="status", qualified_name="Payment.status", type="SYMBOL"
+    )
+    caller = CompactEntityRef(
+        id="ent_2", name="capture", qualified_name="capture_payment", type="SYMBOL"
+    )
+    ev_ref = CompactEvidenceRef(source="routers.py", line="45", summary="calls")
+    item = SemanticImpactItem(
+        entity=caller,
+        relationship_id="rel_1",
+        relationship_type="CALLS",
+        confidence="CERTAIN",
+        hops_count=1,
+        evidence=(ev_ref,),
+    )
+    coverage = ImpactCoverage(status=CoverageStatus.COMPLETE, limitations=())
+    group = ImpactGroup(
+        key="app/routers",
+        entity_count=1,
+        path_count=1,
+        representative_entity_id="ent_2",
+        representative_display_name="capture_payment",
+        entity_ids=("ent_2",),
+    )
+    summary = ImpactSummary(
+        direction="reverse",
+        target=target,
+        start_id="ent_1",
+        revision=None,
+        resolved_from=None,
+        affected_entity_count=1,
+        path_count=1,
+        coverage=coverage,
+        direct_callers=(item,),
+        direct_callees=(),
+        readers=(),
+        writers=(),
+        framework_boundaries=(),
+        indirect_dependencies=(),
+        groups=(group,),
+    )
+
+    dumped = serialize_impact_summary(summary)
+
+    assert dumped["coverage"]["status"] == "COMPLETE"
+    assert dumped["target"]["id"] == "ent_1"
+    assert len(dumped["direct_callers"]) == 1
+    assert dumped["direct_callers"][0]["entity"]["name"] == "capture"
+    assert dumped["direct_callers"][0]["relationship_type"] == "CALLS"
+    assert dumped["direct_callers"][0]["evidence"][0]["source"] == "routers.py"
+    assert dumped["groups"][0]["key"] == "app/routers"

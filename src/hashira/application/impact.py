@@ -176,6 +176,7 @@ from ..core.ids import SystemID
 from ..core.relationships import IMPACT_EDGES, Relationship
 from ..ports.adapters import Limitation, LimitationKind, LimitationScope
 from ..ports.repositories import UnitOfWork
+from .graph import CompactEntityRef, CompactEvidenceRef
 from .history import HistoricalGraph, query_at_revision
 
 __all__ = [
@@ -189,8 +190,10 @@ __all__ = [
     "ImpactSummary",
     "LineageHop",
     "LineageResult",
+    "SemanticImpactItem",
     "follow_lineage",
     "forward_impact",
+    "get_coverage_for",
     "resolve_identity",
     "reverse_impact",
     "summarize_impact",
@@ -327,26 +330,44 @@ class ImpactGroup:
 
 
 @dataclass(frozen=True, slots=True)
+class SemanticImpactItem:
+    """A semantically categorized entity reached during impact traversal,
+    preserving relationship type, confidence, hop distance, and evidence."""
+
+    entity: CompactEntityRef
+    relationship_id: str | None
+    relationship_type: str | None
+    confidence: str
+    hops_count: int
+    evidence: tuple[CompactEvidenceRef, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ImpactSummary:
     """A projection of an `ImpactResult`, never a second source of truth
     for it -- see the module docstring's "Impact Presentation v0.1" entry.
-    Every id named anywhere in `groups` is drawn unchanged from the
-    `ImpactResult` `summarize_impact` computed this from; nothing here is
-    inferred, only grouped, counted, and referenced.
+    Every id named anywhere is drawn unchanged from the `ImpactResult`
+    `summarize_impact` computed this from; nothing here is inferred, only
+    grouped, counted, and referenced.
 
-    `coverage` is carried through verbatim and deliberately placed ahead
-    of `groups` in this shape's own field order: a caller's first
-    question should be "how much should I trust this," not "what's in
-    it" -- see the module docstring for why that ordering is a product
-    decision, not an accident of dataclass field order."""
+    `coverage` is carried through verbatim and placed ahead of categorized
+    results: a caller's first question should be 'how much should I trust
+    this,' not 'what's in it.'"""
 
     direction: str
+    target: CompactEntityRef
     start_id: str
     revision: str | None
     resolved_from: str | None
     affected_entity_count: int
     path_count: int
     coverage: ImpactCoverage
+    direct_callers: tuple[SemanticImpactItem, ...]
+    direct_callees: tuple[SemanticImpactItem, ...]
+    readers: tuple[SemanticImpactItem, ...]
+    writers: tuple[SemanticImpactItem, ...]
+    framework_boundaries: tuple[SemanticImpactItem, ...]
+    indirect_dependencies: tuple[SemanticImpactItem, ...]
     groups: tuple[ImpactGroup, ...]
     """Ordered by `entity_count` descending -- the only ordering this
     module imposes. Not a relevance ranking: a group with one entity may
@@ -364,23 +385,93 @@ def _group_key(entity: Entity) -> str:
 
 
 def summarize_impact(result: ImpactResult) -> ImpactSummary:
-    """Group `result.paths` by each path's endpoint's containing
-    directory (`_group_key`) -- a pure projection computed *from* an
-    already-produced `ImpactResult`, never a new traversal. Every
-    `ImpactPath` contributes to exactly one group, matching
-    `ImpactResult.affected_entities`'s own one-path-per-reached-entity
-    invariant, so `sum(g.entity_count for g in groups) ==
-    result.affected_entity_count` always holds --
-    `tests/unit/test_impact.py`'s own summary tests hold this as a
-    permanent invariant, alongside the stronger one from the module
-    docstring: every id `groups` names traces back to `result` unchanged.
+    """Project `result` into semantically organized impact categories
+    (callers, callees, readers, writers, framework boundaries, indirect
+    dependencies) alongside directory-level groups.
+
+    Computed *from* an already-produced `ImpactResult`, never a new traversal.
     """
+    target = CompactEntityRef(
+        id=result.start.id,
+        name=result.start.name,
+        qualified_name=result.start.qualified_name,
+        type=result.start.type.value,
+    )
+
+    direct_callers: list[SemanticImpactItem] = []
+    direct_callees: list[SemanticImpactItem] = []
+    readers: list[SemanticImpactItem] = []
+    writers: list[SemanticImpactItem] = []
+    framework_boundaries: list[SemanticImpactItem] = []
+    indirect_dependencies: list[SemanticImpactItem] = []
+
     entities_by_key: dict[str, list[Entity]] = defaultdict(list)
     path_counts: dict[str, int] = defaultdict(int)
+
     for path in result.paths:
         key = _group_key(path.endpoint)
         entities_by_key[key].append(path.endpoint)
         path_counts[key] += 1
+
+        endpoint_ref = CompactEntityRef(
+            id=path.endpoint.id,
+            name=path.endpoint.name,
+            qualified_name=path.endpoint.qualified_name,
+            type=path.endpoint.type.value,
+        )
+
+        if len(path.hops) == 1:
+            hop = path.hops[0]
+            rel = hop.relationship
+            evidence = tuple(
+                CompactEvidenceRef(
+                    source=e.source.reference if e.source else None,
+                    line=e.locator,
+                    summary=e.summary,
+                )
+                for e in hop.evidence
+            )
+            item = SemanticImpactItem(
+                entity=endpoint_ref,
+                relationship_id=rel.id,
+                relationship_type=rel.type.value,
+                confidence=rel.confidence.value if rel.confidence is not None else "CERTAIN",
+                hops_count=1,
+                evidence=evidence,
+            )
+            if rel.type is RelationshipType.CALLS:
+                if result.direction == "reverse":
+                    direct_callers.append(item)
+                else:
+                    direct_callees.append(item)
+            elif rel.type is RelationshipType.READS:
+                readers.append(item)
+            elif rel.type is RelationshipType.WRITES:
+                writers.append(item)
+            elif rel.type in (RelationshipType.EXPOSES, RelationshipType.IMPORTS):
+                framework_boundaries.append(item)
+            else:
+                framework_boundaries.append(item)
+        elif len(path.hops) > 1:
+            first_hop = path.hops[0]
+            first_rel = first_hop.relationship
+            evidence = tuple(
+                CompactEvidenceRef(
+                    source=e.source.reference if e.source else None,
+                    line=e.locator,
+                    summary=e.summary,
+                )
+                for e in first_hop.evidence
+            )
+            item = SemanticImpactItem(
+                entity=endpoint_ref,
+                relationship_id=first_rel.id,
+                relationship_type=first_rel.type.value,
+                confidence=path.weakest_confidence.value,
+                hops_count=len(path.hops),
+                evidence=evidence,
+            )
+            indirect_dependencies.append(item)
 
     groups = []
     for key, entities in entities_by_key.items():
@@ -400,12 +491,19 @@ def summarize_impact(result: ImpactResult) -> ImpactSummary:
 
     return ImpactSummary(
         direction=result.direction,
+        target=target,
         start_id=result.start.id,
         revision=result.revision,
         resolved_from=result.resolved_from,
         affected_entity_count=len(result.affected_entities),
         path_count=len(result.paths),
         coverage=result.coverage,
+        direct_callers=tuple(direct_callers),
+        direct_callees=tuple(direct_callees),
+        readers=tuple(readers),
+        writers=tuple(writers),
+        framework_boundaries=tuple(framework_boundaries),
+        indirect_dependencies=tuple(indirect_dependencies),
         groups=tuple(groups),
     )
 
@@ -743,7 +841,7 @@ _CONDITIONAL_LIMITATION_TEXT: dict[LimitationKind, tuple[LimitationScope, str]] 
 }
 
 
-def _coverage_for(uow: UnitOfWork, *, system_id: SystemID, start: Entity) -> ImpactCoverage:
+def get_coverage_for(uow: UnitOfWork, *, system_id: SystemID, start: Entity) -> ImpactCoverage:
     """Conditional limitations read `start`'s own indexing-time metadata
     (per-entity, precise); structural limitations read the latest complete
     snapshot's `diagnostics` (pipeline-wide -- see `ImpactCoverage`'s own
@@ -769,6 +867,9 @@ def _coverage_for(uow: UnitOfWork, *, system_id: SystemID, start: Entity) -> Imp
     limitations = (*conditional, *structural)
     status = CoverageStatus.PARTIAL if limitations else CoverageStatus.COMPLETE
     return ImpactCoverage(status=status, limitations=limitations)
+
+
+_coverage_for = get_coverage_for
 
 
 @dataclass(frozen=True, slots=True)

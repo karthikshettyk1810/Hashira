@@ -20,6 +20,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..application.graph import (
+    CompactEntityRef,
+    CompactEvidenceRef,
+    EntityNeighborhood,
+)
 from ..application.history import HistoricalGraph
 from ..application.impact import (
     ImpactCoverage,
@@ -29,13 +34,17 @@ from ..application.impact import (
     ImpactSummary,
     LineageHop,
     LineageResult,
+    SemanticImpactItem,
 )
 from ..core.entities import Entity
 from ..core.evidence import Evidence
 from ..core.relationships import Relationship
 
 __all__ = [
+    "serialize_compact_entity",
+    "serialize_compact_evidence",
     "serialize_entity",
+    "serialize_entity_neighborhood",
     "serialize_evidence",
     "serialize_historical_graph",
     "serialize_impact_result",
@@ -49,12 +58,70 @@ def serialize_entity(entity: Entity) -> dict[str, Any]:
     return entity.model_dump(mode="json")
 
 
+def serialize_compact_entity(entity: CompactEntityRef) -> dict[str, Any]:
+    return {
+        "id": entity.id,
+        "name": entity.name,
+        "qualified_name": entity.qualified_name,
+        "type": entity.type,
+    }
+
+
+def serialize_compact_evidence(evidence: CompactEvidenceRef) -> dict[str, Any]:
+    return {
+        "source": evidence.source,
+        "line": evidence.line,
+        "summary": evidence.summary,
+    }
+
+
 def serialize_relationship(relationship: Relationship) -> dict[str, Any]:
     return relationship.model_dump(mode="json")
 
 
 def serialize_evidence(evidence: Evidence) -> dict[str, Any]:
     return evidence.model_dump(mode="json")
+
+
+def serialize_entity_neighborhood(neighborhood: EntityNeighborhood) -> dict[str, Any]:
+    """Serialize an entity's 1-hop neighborhood with coverage first,
+    compact neighbor entities, edge confidence, and compact evidence."""
+    return {
+        "coverage": _serialize_coverage(neighborhood.coverage),
+        "target": serialize_compact_entity(neighborhood.entity),
+        "revision": neighborhood.revision,
+        "incoming": [
+            {
+                "relationship_id": edge.relationship_id,
+                "type": edge.type,
+                "confidence": edge.confidence,
+                "entity": serialize_compact_entity(edge.entity),
+                "evidence": [serialize_compact_evidence(e) for e in edge.evidence],
+            }
+            for edge in neighborhood.incoming
+        ],
+        "outgoing": [
+            {
+                "relationship_id": edge.relationship_id,
+                "type": edge.type,
+                "confidence": edge.confidence,
+                "entity": serialize_compact_entity(edge.entity),
+                "evidence": [serialize_compact_evidence(e) for e in edge.evidence],
+            }
+            for edge in neighborhood.outgoing
+        ],
+    }
+
+
+def _serialize_semantic_impact_item(item: SemanticImpactItem) -> dict[str, Any]:
+    return {
+        "entity": serialize_compact_entity(item.entity),
+        "relationship_id": item.relationship_id,
+        "relationship_type": item.relationship_type,
+        "confidence": item.confidence,
+        "hops_count": item.hops_count,
+        "evidence": [serialize_compact_evidence(e) for e in item.evidence],
+    }
 
 
 def _serialize_impact_hop(hop: ImpactHop) -> dict[str, Any]:
@@ -122,18 +189,28 @@ def serialize_impact_result(result: ImpactResult) -> dict[str, Any]:
 def serialize_impact_summary(summary: ImpactSummary) -> dict[str, Any]:
     """`coverage` first, deliberately, matching `ImpactSummary`'s own
     field order: a caller's first question should be "how much should I
-    trust this" before "what's in it" (`application/impact.py`'s "Impact
-    Presentation v0.1" entry). Every entity named in `groups` is a bare
-    `{"entity_id", "display_name"}` pair, never a full record -- `get_entity`/
-    `get_relationships` are the drill-down, not this response."""
+    trust this" before "what's in it". Categorized by semantic edge
+    roles (callers, callees, readers, writers, framework boundaries,
+    indirect dependencies) alongside directory-level groups."""
     return {
+        "coverage": _serialize_coverage(summary.coverage),
+        "target": serialize_compact_entity(summary.target),
         "direction": summary.direction,
         "start_id": summary.start_id,
         "revision": summary.revision,
         "resolved_from": summary.resolved_from,
-        "coverage": _serialize_coverage(summary.coverage),
         "affected_entity_count": summary.affected_entity_count,
         "path_count": summary.path_count,
+        "direct_callers": [_serialize_semantic_impact_item(i) for i in summary.direct_callers],
+        "direct_callees": [_serialize_semantic_impact_item(i) for i in summary.direct_callees],
+        "readers": [_serialize_semantic_impact_item(i) for i in summary.readers],
+        "writers": [_serialize_semantic_impact_item(i) for i in summary.writers],
+        "framework_boundaries": [
+            _serialize_semantic_impact_item(i) for i in summary.framework_boundaries
+        ],
+        "indirect_dependencies": [
+            _serialize_semantic_impact_item(i) for i in summary.indirect_dependencies
+        ],
         "groups": [
             {
                 "key": group.key,

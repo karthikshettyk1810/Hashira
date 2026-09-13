@@ -6,7 +6,12 @@ from __future__ import annotations
 
 import pytest
 
-from hashira.application.graph import get_entity, get_entity_at_revision, get_relationships
+from hashira.application.graph import (
+    get_entity,
+    get_entity_at_revision,
+    get_entity_neighborhood,
+    get_relationships,
+)
 from hashira.core import (
     Entity,
     EntityType,
@@ -203,3 +208,73 @@ def test_get_relationships_is_revision_aware(db: MemoryDatabase, system: System)
 
     assert at_rev1 == []
     assert len(at_rev2) == 1
+
+
+# --- get_entity_neighborhood --------------------------------------------------
+
+
+def test_get_entity_neighborhood_returns_compact_neighbors_and_coverage(
+    db: MemoryDatabase, system: System
+) -> None:
+    target = _entity(system, "Payment.status")
+    caller = _entity(system, "CheckoutView")
+    model = _entity(system, "Payment")
+    ev = _evidence(system)
+    rel_in = _rel(system, caller, target, RelationshipType.READS, ev)
+    rel_out = _rel(system, target, model, RelationshipType.EXTENDS, ev)
+
+    with db.unit_of_work() as uow:
+        uow.graph.upsert_entities([target, caller, model])
+        uow.graph.upsert_relationships([rel_in, rel_out])
+        uow.evidence.record([ev])
+        uow.commit()
+
+    with db.unit_of_work() as uow:
+        neighborhood = get_entity_neighborhood(uow, system_id=system.id, entity_id=target.id)
+
+    assert neighborhood is not None
+    assert neighborhood.entity.id == target.id
+    assert neighborhood.entity.name == "Payment.status"
+    assert neighborhood.coverage.status.value == "COMPLETE"
+    assert len(neighborhood.incoming) == 1
+    assert neighborhood.incoming[0].relationship_id == rel_in.id
+    assert neighborhood.incoming[0].type == "READS"
+    assert neighborhood.incoming[0].confidence == "CERTAIN"
+    assert neighborhood.incoming[0].entity.id == caller.id
+    assert neighborhood.incoming[0].entity.name == "CheckoutView"
+    assert len(neighborhood.incoming[0].evidence) == 1
+    assert neighborhood.incoming[0].evidence[0].source == "app.py"
+
+    assert len(neighborhood.outgoing) == 1
+    assert neighborhood.outgoing[0].relationship_id == rel_out.id
+    assert neighborhood.outgoing[0].type == "EXTENDS"
+    assert neighborhood.outgoing[0].entity.id == model.id
+
+
+def test_get_entity_neighborhood_unknown_id_returns_none(
+    db: MemoryDatabase, system: System
+) -> None:
+    with db.unit_of_work() as uow:
+        assert (
+            get_entity_neighborhood(uow, system_id=system.id, entity_id="ent_nonexistent")
+            is None
+        )
+
+
+def test_get_entity_neighborhood_carries_coverage_limitations(
+    db: MemoryDatabase, system: System
+) -> None:
+    target = _entity(system, "Payment.status").model_copy(
+        update={"metadata": {"coverage_limitation_kinds": ["RETURN_VALUE_PROVENANCE"]}}
+    )
+    with db.unit_of_work() as uow:
+        uow.graph.upsert_entities([target])
+        uow.commit()
+
+    with db.unit_of_work() as uow:
+        neighborhood = get_entity_neighborhood(uow, system_id=system.id, entity_id=target.id)
+
+    assert neighborhood is not None
+    assert neighborhood.coverage.status.value == "PARTIAL"
+    assert len(neighborhood.coverage.limitations) == 1
+    assert neighborhood.coverage.limitations[0].kind.value == "RETURN_VALUE_PROVENANCE"

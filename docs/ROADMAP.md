@@ -1909,3 +1909,27 @@ confirmed unmodified (`git status` clean).
 
 **Test counts**: 615 → 626 (9 positive regressions + 2 boundary-matrix).
 Ruff clean, mypy --strict clean.
+
+### R5: Agent-Native Graph Interface (MCP Projection Optimization)
+
+**Provenance**: Real-repository controlled benchmark on 248K LOC Django monolith (`OotaApp/backend`).
+Baseline vs Treatment comparison proved the core resolver was not the primary bottleneck, but agents
+suffered from N+1 round-trip hydration (`get_relationships` returning opaque IDs) and payload bloating
+in raw path trees.
+
+**Capabilities Implemented**:
+1. **`get_entity_neighborhood`** (Tool):
+   - Computes 1-hop semantic environment in exactly 1 MCP call.
+   - Hydrates compact neighbor entities (`id`, `name`, `qualified_name`, `type`) without full Entity dump overhead.
+   - Attaches edge type, confidence, compact source-location evidence (`file`, `line`), and coverage limitations.
+   - Batch fetches neighbor entities and evidence from UOW, eliminating N+1 DB round-trips.
+2. **Semantic `summarize_impact`** (Tool Enhancement):
+   - Projections categorized by semantic edge roles: `direct_callers`, `direct_callees`, `readers`, `writers`,
+     `framework_boundaries`, and `indirect_dependencies`, alongside directory-level `groups`.
+   - Coverage-first structure (`coverage.status` and `coverage.limitations` prominent).
+   - Preserves relationship IDs, confidence, and source location evidence without duplicate entity dumps.
+
+**Quality Gates & Verification**:
+- Unit & MCP Protocol tests: 626 → 627 passing tests (100%).
+- Ruff clean, mypy --strict clean across 68 source files.
+- Validated on real benchmark repositories (`OotaApp/backend` and `Rider`); 0 repository mutations.

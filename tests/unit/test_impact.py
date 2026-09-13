@@ -872,3 +872,77 @@ def test_summarize_impact_never_invents_an_entity_id(db: MemoryDatabase, system:
     assert summarized_ids == canonical_ids  # never dropped, never duplicated
     assert sum(g.entity_count for g in summary.groups) == summary.affected_entity_count
     assert sum(g.path_count for g in summary.groups) == summary.path_count
+
+
+def test_summarize_impact_categorizes_callers_readers_writers_and_indirect(
+    db: MemoryDatabase, system: System
+) -> None:
+    target = _entity(system, "Payment.status")
+    caller = _entity_at(system, "process_order", "app/services/order.py")
+    reader = _entity_at(system, "get_status", "app/routers/status.py")
+    writer = _entity_at(system, "set_status", "app/services/status.py")
+    indirect = _entity_at(system, "checkout_view", "app/views/checkout.py")
+    ev = _evidence(system)
+
+    _seed(
+        db,
+        system,
+        [target, caller, reader, writer, indirect],
+        [
+            _rel(system, caller, target, RelationshipType.CALLS, evidence=ev),
+            _rel(system, reader, target, RelationshipType.READS, evidence=ev),
+            _rel(system, writer, target, RelationshipType.WRITES, evidence=ev),
+            _rel(system, indirect, caller, RelationshipType.CALLS, evidence=ev),
+        ],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = reverse_impact(uow, system_id=system.id, entity_id=target.id)
+    summary = summarize_impact(result)
+
+    assert summary.target.id == target.id
+    assert summary.target.name == "Payment.status"
+    assert len(summary.direct_callers) == 1
+    assert summary.direct_callers[0].entity.id == caller.id
+    assert summary.direct_callers[0].relationship_type == "CALLS"
+    assert len(summary.direct_callers[0].evidence) == 1
+
+    assert len(summary.readers) == 1
+    assert summary.readers[0].entity.id == reader.id
+    assert summary.readers[0].relationship_type == "READS"
+
+    assert len(summary.writers) == 1
+    assert summary.writers[0].entity.id == writer.id
+    assert summary.writers[0].relationship_type == "WRITES"
+
+    assert len(summary.indirect_dependencies) == 1
+    assert summary.indirect_dependencies[0].entity.id == indirect.id
+    assert summary.indirect_dependencies[0].hops_count == 2
+    assert summary.indirect_dependencies[0].confidence == "CERTAIN"
+
+
+def test_summarize_impact_forward_direction_categorizes_callees(
+    db: MemoryDatabase, system: System
+) -> None:
+    caller = _entity_at(system, "CheckoutView", "app/views.py")
+    callee = _entity_at(system, "PaymentService.pay", "app/services.py")
+    ev = _evidence(system)
+
+    _seed(
+        db,
+        system,
+        [caller, callee],
+        [_rel(system, caller, callee, RelationshipType.CALLS, evidence=ev)],
+        [ev],
+    )
+
+    with db.unit_of_work() as uow:
+        result = forward_impact(uow, system_id=system.id, entity_id=caller.id)
+    summary = summarize_impact(result)
+
+    assert summary.direction == "forward"
+    assert len(summary.direct_callees) == 1
+    assert summary.direct_callees[0].entity.id == callee.id
+    assert summary.direct_callees[0].relationship_type == "CALLS"
+    assert len(summary.direct_callers) == 0
