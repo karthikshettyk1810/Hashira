@@ -457,6 +457,104 @@ def _typed_parameter_model_instances(
     return types
 
 
+def _queryset_local_instances(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ctx: ResolutionContext,
+    fields_by_model: dict[str, dict[str, str]],
+) -> set[str]:
+    """Detect `name = Model.objects.<method>(...)` -- a queryset-derived
+    local alias.  Returns the set of names recognized as sourced from a
+    known Django model's queryset, for *disclosure* only (not resolution).
+
+    The detection is narrow and idiomatic: a call chain is model-derived
+    only when the root of the chain resolves to a known model and the
+    first attribute access after it is `.objects` -- Django's own manager
+    convention.  `foo.bar.baz()` where `foo` merely happens to resolve to
+    a known name is NOT matched unless `.objects` appears as the second
+    component.  This avoids classifying arbitrary chains as model-derived
+    merely because a root name happens to share a name with a model.
+
+    Examples matched:
+        tour = Tour.objects.filter(stop=stop).first()
+        tour = Tour.objects.get(id=tour_id)
+        tours = Tour.objects.all()
+
+    Examples NOT matched (correctly silent):
+        result = some_service.get_tour()  -- no `.objects` component
+        foo = bar.baz()                   -- root is not a model
+        tour = Tour()                     -- direct constructor, handled
+                                            by `_local_model_instances`
+    """
+    names: set[str] = set()
+
+    def check(node: ast.AST) -> None:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            target, value = node.targets[0], node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            target, value = node.target, node.value
+        if target is None or not isinstance(value, ast.Call):
+            return
+        assert isinstance(target, ast.Name)
+        # Walk down the call chain to find the root: for
+        # `Tour.objects.filter(...).first()`, the value is
+        # Call(func=Attr(value=Call(func=Attr(value=Attr(
+        #   value=Name('Tour'), attr='objects'), attr='filter')),
+        #   attr='first'))
+        # We peel away Call/Attribute wrappers to find the deepest
+        # Attribute node whose value is a Name — and check that the
+        # attribute is `.objects`.
+        cursor: ast.expr = value
+        while isinstance(cursor, ast.Call):
+            cursor = cursor.func
+        # cursor is now the outermost func (e.g. Tour.objects.filter(...).first)
+        # We need to find a `.objects` attribute whose value resolves to
+        # a known model.  Walk the Attribute chain down.
+        if not isinstance(cursor, ast.Attribute):
+            return
+        # Collect the full attribute chain above a Name root.
+        chain: list[str] = []
+        node_cursor: ast.expr = cursor
+        while isinstance(node_cursor, ast.Attribute):
+            chain.append(node_cursor.attr)
+            node_cursor = node_cursor.value
+            # Skip over intermediate Call nodes in the chain
+            # (e.g. filter(...) in Tour.objects.filter(...).first())
+            while isinstance(node_cursor, ast.Call):
+                node_cursor = node_cursor.func
+        chain.reverse()  # now chain is e.g. ['objects', 'filter', 'first']
+        if not isinstance(node_cursor, ast.Name):
+            return
+        # The root Name must resolve to a known model.
+        resolved = resolve_expr(node_cursor, ctx)
+        if resolved.qualified_name not in fields_by_model:
+            return
+        # The chain must start with `.objects` (Django manager convention).
+        if not chain or chain[0] != "objects":
+            return
+        names.add(target.id)
+
+    def walk(node: ast.AST) -> None:
+        check(node)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+            return
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+
+    for stmt in func_node.body:
+        walk(stmt)
+    return names
+
+
 def _check_dynamic_attribute_call(
     call: ast.Call,
     func_qn: str,
@@ -492,6 +590,37 @@ def _check_dynamic_attribute_call(
     )
 
 
+
+def _chain_root_is_known_instance(
+    attr_node: ast.Attribute,
+    func_ctx: ResolutionContext,
+    fields_by_model: dict[str, dict[str, str]],
+) -> bool:
+    """True when the root name of an attribute chain resolves to a known
+    model instance in `func_ctx.local_instance_types`.
+
+    For `stop.tour.status`, `attr_node` is `stop.tour` — the chain's root
+    name is `stop`, checked against known model instances.  For deeper
+    chains (`a.b.c.status`, `attr_node` is `a.b.c`) we walk down to the
+    root `a`.
+
+    This is the precision guard for chained-attribute disclosure: without
+    it, `bar.tour.status` where `bar` is an unrelated object would produce
+    a false limitation merely because `status` is a known field name.
+    With it, the disclosure only fires when the chain root is itself a
+    variable whose type we *do* know is a Django model — establishing
+    model provenance for the chain, even though the intermediate hop
+    (`tour`) is unresolvable."""
+    cursor: ast.expr = attr_node
+    while isinstance(cursor, ast.Attribute):
+        cursor = cursor.value
+    if not isinstance(cursor, ast.Name):
+        return False
+    return cursor.id in func_ctx.local_instance_types and (
+        func_ctx.local_instance_types[cursor.id] in fields_by_model
+    )
+
+
 def _extract_field_accesses(
     tree: ast.Module,
     module_qn: str,
@@ -500,20 +629,38 @@ def _extract_field_accesses(
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Every `instance.field` read or write, for an `instance` whose type is
     a *local, direct* assignment to a known Django model
-    (`payment = Payment(...)`). `self.attr` access to an instance attribute
-    is not tracked in v0.1 — only local variables, mirroring
-    `adapters.python.extractor`'s own `LOCAL_INSTANCE` scope. A field access
-    through anything else (an attribute chain, a function parameter, a
-    dict/list element) stays unresolved rather than guessed at.
+    (`payment = Payment(...)`), or a typed parameter whose annotation
+    resolves to a known model (`def f(payment: Payment)`).
 
-    Also returns `getattr`/`setattr` calls naming a real field by a literal
-    string (`_check_dynamic_attribute_call`) as a second, `unresolved` list
-    -- disclosed, never resolved into a real access."""
+    Unresolved patterns — emitted as `django.unresolved_field_access`:
+
+    - `getattr`/`setattr` calls naming a real field by a literal string
+      (`_check_dynamic_attribute_call`), tagged `DYNAMIC_ATTRIBUTE_ACCESS`.
+
+    - **Queryset-derived local aliases** (`tour = Tour.objects.filter(...)
+      .first()` then `tour.status`): `tour` is recognized as model-sourced
+      through `_queryset_local_instances` (narrowly: root resolves to a
+      known model and the chain passes through `.objects`), disclosed as
+      `RETURN_VALUE_PROVENANCE`.
+
+    - **Chained attribute access on a known model instance**
+      (`stop.tour.status` where `stop` is a typed parameter or local
+      instance of a known model): the base is an `ast.Attribute` whose
+      own root is a known model instance, but the intermediate hop
+      (`.tour`) is unresolvable — disclosed as `RETURN_VALUE_PROVENANCE`.
+      Only fires when the chain root is a name whose type is known (a
+      resolved model instance), not for arbitrary chained accesses where
+      the field name coincidentally matches a model field."""
     accesses: list[dict[str, object]] = []
     unresolved: list[dict[str, object]] = []
     known_field_names = {name for fields in fields_by_model.values() for name in fields}
 
-    def collect(body: list[ast.stmt], func_qn: str, func_ctx: ResolutionContext) -> None:
+    def collect(
+        body: list[ast.stmt],
+        func_qn: str,
+        func_ctx: ResolutionContext,
+        queryset_names: set[str],
+    ) -> None:
         def walk(node: ast.AST) -> None:
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, ast.Attribute):
@@ -536,6 +683,45 @@ def _extract_field_accesses(
                                     "line": child.lineno,
                                 }
                             )
+                    elif (
+                        child.attr in known_field_names
+                        and isinstance(child.value, ast.Name)
+                        and child.value.id in queryset_names
+                    ):
+                        # Queryset-local-alias: `tour = Tour.objects
+                        # .filter(...).first()` then `tour.status` --
+                        # `tour`'s type is model-sourced (through the
+                        # `.objects` manager) but not resolvable to a
+                        # specific model instance type without tracking
+                        # queryset return values.
+                        unresolved.append(
+                            {
+                                "accessor_qualified_name": func_qn,
+                                "attribute_name": child.attr,
+                                "limitation_kind": LimitationKind.RETURN_VALUE_PROVENANCE.value,
+                                "line": child.lineno,
+                            }
+                        )
+                    elif (
+                        child.attr in known_field_names
+                        and isinstance(child.value, ast.Attribute)
+                        and _chain_root_is_known_instance(child.value, func_ctx, fields_by_model)
+                    ):
+                        # Chained attribute access on a known model
+                        # instance: `stop.tour.status` where `stop` is
+                        # a typed parameter or local instance of a known
+                        # model.  The intermediate `.tour` hop is
+                        # unresolvable (would require FK traversal),
+                        # but the chain root's model provenance is
+                        # established.
+                        unresolved.append(
+                            {
+                                "accessor_qualified_name": func_qn,
+                                "attribute_name": child.attr,
+                                "limitation_kind": LimitationKind.RETURN_VALUE_PROVENANCE.value,
+                                "line": child.lineno,
+                            }
+                        )
                 elif isinstance(child, ast.Call):
                     if isinstance(child.func, ast.Name) and child.func.id in (
                         "getattr",
@@ -559,17 +745,23 @@ def _extract_field_accesses(
                 func_qn = f"{qualified_name}.{stmt.name}"
                 param_types = _typed_parameter_model_instances(stmt, ctx, fields_by_model)
                 local_types = _local_model_instances(stmt, ctx, fields_by_model)
+                queryset_names = _queryset_local_instances(stmt, ctx, fields_by_model)
+                # Remove names already resolved through constructor or
+                # typed-parameter provenance — those are tracked, not
+                # disclosed.
+                queryset_names -= set(param_types) | set(local_types)
                 func_ctx = ResolutionContext(
                     module_qualified_name=ctx.module_qualified_name,
                     imports=ctx.imports,
                     module_locals=ctx.module_locals,
                     local_instance_types={**param_types, **local_types},
                 )
-                collect(stmt.body, func_qn, func_ctx)
+                collect(stmt.body, func_qn, func_ctx, queryset_names)
                 walk_body(stmt.body, func_qn)
 
     walk_body(tree.body, module_qn)
     return accesses, unresolved
+
 
 
 def _emit(

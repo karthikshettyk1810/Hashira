@@ -22,6 +22,8 @@ almost always no, and should stay no); it is:
 | decorator-injected attr (`.delay()`)     | yes, unresolved | DYNAMIC_DISPATCH -- imprecise, open |
 | framework reflection (FastAPI/Pydantic)  | n/a, no access | FRAMEWORK_REFLECTION (blanket) |
 | framework reflection (Django)            | n/a            | FRAMEWORK_REFLECTION (R3 fix) |
+| queryset local alias (Django)            | yes (R4+ fix)  | RETURN_VALUE_PROVENANCE       |
+| chained attr on known model (Django)     | yes (R4+ fix)  | RETURN_VALUE_PROVENANCE       |
 
 Two real, distinct gaps closed this pass, both pure detect-and-disclose,
 no new resolution logic:
@@ -257,3 +259,62 @@ def test_logged_not_fixed__decorator_injected_attribute_call(
     assert [r for r in run.relationships if r.type.value == "CALLS"] == []
     unresolved_calls = [o for o in run.unresolved if o.kind == "python.call"]
     assert any(o.payload["callee_expr"] == "publish_pending_outbox.delay" for o in unresolved_calls)
+
+
+# --- Disclosed: Django queryset local alias + chained attribute access ------
+
+
+def test_disclosed__django_queryset_local_alias(tmp_path: Path, system_id: str) -> None:
+    """Real-repository finding: `tour = Tour.objects.filter(...).first()`
+    then `tour.status` — previously silently dropped (no edge, no
+    limitation).  Now disclosed as `RETURN_VALUE_PROVENANCE` through
+    `_queryset_local_instances`, narrowly gated on `.objects` manager."""
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from django.db import models\n\n\nclass Tour(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n",
+    )
+    _write(
+        tmp_path,
+        "tours/services.py",
+        "from .models import Tour\n\n\n"
+        "def get_status(stop):\n"
+        "    tour = Tour.objects.filter(stop=stop).first()\n"
+        "    return tour.status\n",
+    )
+    base = _python_base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    unresolved = [o for o in addition.observations if o.kind == "django.unresolved_field_access"]
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["limitation_kind"] == LimitationKind.RETURN_VALUE_PROVENANCE.value
+
+
+def test_disclosed__django_chained_attribute_on_known_model(
+    tmp_path: Path, system_id: str
+) -> None:
+    """Real-repository finding: `stop.tour.status` where `stop` is a typed
+    parameter of a known Django model — previously silently dropped.
+    Now disclosed as `RETURN_VALUE_PROVENANCE`, gated on the chain root
+    being a known model instance (not any arbitrary chain)."""
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from django.db import models\n\n\n"
+        "class Tour(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n\n\n"
+        "class Stop(models.Model):\n"
+        "    name = models.CharField(max_length=100)\n",
+    )
+    _write(
+        tmp_path,
+        "tours/services.py",
+        "from .models import Stop\n\n\n"
+        "def get_tour_status(stop: Stop):\n"
+        "    return stop.tour.status\n",
+    )
+    base = _python_base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+    unresolved = [o for o in addition.observations if o.kind == "django.unresolved_field_access"]
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["limitation_kind"] == LimitationKind.RETURN_VALUE_PROVENANCE.value

@@ -426,3 +426,289 @@ def test_addition_does_not_echo_the_base_observations(tmp_path: Path, system_id:
     addition_kinds = {o.kind for o in addition.observations}
     assert "python.symbol" not in addition_kinds
     assert "python.module" not in addition_kinds
+
+
+# --- queryset-local-alias disclosure (Pattern A) ----------------------------
+
+
+def test_queryset_filter_first_alias_is_disclosed_not_resolved(
+    tmp_path: Path, system_id: str
+) -> None:
+    """Real-repository finding: `tour = Tour.objects.filter(stop=stop).first()`
+    then `tour.status` -- the dominant queryset pattern in Django code.
+    `_local_model_instances` only recognizes `= ModelClass(...)` (direct
+    constructor); the queryset chain is not a constructor call, so `tour`
+    was not in `local_instance_types` and `tour.status` was silently
+    dropped — no edge, no limitation.
+
+    Now disclosed as `RETURN_VALUE_PROVENANCE` through `_queryset_local_instances`,
+    which narrowly detects the `.objects` manager pattern."""
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from django.db import models\n\n\nclass Tour(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n",
+    )
+    _write(
+        tmp_path,
+        "tours/services.py",
+        "from .models import Tour\n\n\n"
+        "def get_status(stop):\n"
+        "    tour = Tour.objects.filter(stop=stop).first()\n"
+        "    return tour.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    assert _by_kind(addition, "django.field_access") == []
+    unresolved = _by_kind(addition, "django.unresolved_field_access")
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["attribute_name"] == "status"
+    assert unresolved[0].payload["limitation_kind"] == "RETURN_VALUE_PROVENANCE"
+
+
+def test_queryset_get_alias_is_disclosed(tmp_path: Path, system_id: str) -> None:
+    """Same pattern with `.get()` instead of `.filter(...).first()`."""
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from django.db import models\n\n\nclass Tour(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n",
+    )
+    _write(
+        tmp_path,
+        "tours/services.py",
+        "from .models import Tour\n\n\n"
+        "def get_status(tour_id):\n"
+        "    tour = Tour.objects.get(id=tour_id)\n"
+        "    return tour.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    assert _by_kind(addition, "django.field_access") == []
+    unresolved = _by_kind(addition, "django.unresolved_field_access")
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["attribute_name"] == "status"
+    assert unresolved[0].payload["limitation_kind"] == "RETURN_VALUE_PROVENANCE"
+
+
+def test_queryset_alias_does_not_override_constructor_resolution(
+    tmp_path: Path, system_id: str
+) -> None:
+    """If a name is already resolved through direct constructor call,
+    the queryset detection must NOT downgrade it to a disclosure.
+    `tour = Tour()` should still produce a real `django.field_access`,
+    not an unresolved disclosure."""
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from django.db import models\n\n\nclass Tour(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n",
+    )
+    _write(
+        tmp_path,
+        "tours/services.py",
+        "from .models import Tour\n\n\n"
+        "def make_tour():\n"
+        "    tour = Tour()\n"
+        "    return tour.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    accesses = _by_kind(addition, "django.field_access")
+    assert len(accesses) == 1
+    assert accesses[0].payload["field_name"] == "status"
+    assert _by_kind(addition, "django.unresolved_field_access") == []
+
+
+# --- chained-attribute-access disclosure (Pattern B) -------------------------
+
+
+def test_chained_attribute_access_on_known_model_is_disclosed(
+    tmp_path: Path, system_id: str
+) -> None:
+    """Real-repository finding: `stop.tour.status` where `stop` is a typed
+    parameter of a known model.  The intermediate `.tour` hop is
+    unresolvable (would require FK traversal), but the chain root `stop`
+    is a known model instance — establishing model provenance.
+
+    Disclosed as `RETURN_VALUE_PROVENANCE`, not silently dropped."""
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from django.db import models\n\n\n"
+        "class Tour(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n\n\n"
+        "class Stop(models.Model):\n"
+        "    name = models.CharField(max_length=100)\n",
+    )
+    _write(
+        tmp_path,
+        "tours/services.py",
+        "from .models import Stop\n\n\n"
+        "def get_tour_status(stop: Stop):\n"
+        "    return stop.tour.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    assert _by_kind(addition, "django.field_access") == []
+    unresolved = _by_kind(addition, "django.unresolved_field_access")
+    assert len(unresolved) == 1
+    assert unresolved[0].payload["attribute_name"] == "status"
+    assert unresolved[0].payload["limitation_kind"] == "RETURN_VALUE_PROVENANCE"
+
+
+def test_chained_attribute_access_unknown_field_is_correctly_silent(
+    tmp_path: Path, system_id: str
+) -> None:
+    """Precision guard: `stop.tour.unrelated_attr` where `unrelated_attr`
+    is NOT a known model field name — no disclosure.  Prevents over-eager
+    reporting that would flood coverage with false warnings."""
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from django.db import models\n\n\n"
+        "class Stop(models.Model):\n"
+        "    name = models.CharField(max_length=100)\n",
+    )
+    _write(
+        tmp_path,
+        "tours/services.py",
+        "from .models import Stop\n\n\n"
+        "def do_thing(stop: Stop):\n"
+        "    return stop.tour.unrelated_attr\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    assert _by_kind(addition, "django.field_access") == []
+    assert _by_kind(addition, "django.unresolved_field_access") == []
+
+
+# --- adversarial precision tests (reviewer amendment) ------------------------
+
+
+def test_adversarial__unrelated_object_with_coincidental_field_name(
+    tmp_path: Path, system_id: str
+) -> None:
+    """Precision: `user.status` where `user` is an unrelated, untyped local
+    variable and `status` happens to be a real field on some Django model
+    elsewhere.  Must NOT produce a disclosure — the chain root `user` is
+    NOT in `local_instance_types`, so neither the queryset branch nor the
+    chained-attribute branch should fire.  A direct `name.field` on an
+    unknown name stays correctly silent."""
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from django.db import models\n\n\nclass Tour(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n",
+    )
+    _write(
+        tmp_path,
+        "tours/services.py",
+        "def check_user(user):\n"
+        "    return user.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    assert _by_kind(addition, "django.field_access") == []
+    assert _by_kind(addition, "django.unresolved_field_access") == []
+
+
+def test_adversarial__unrelated_chain_with_coincidental_field_name(
+    tmp_path: Path, system_id: str
+) -> None:
+    """Precision: `bar.tour.status` where `bar` is a completely unrelated
+    object — NOT a known Django model instance.  Even though `status`
+    happens to be a real model field name, the chain root `bar` is not
+    in `local_instance_types`, so the disclosure must NOT fire.
+
+    This is the exact adversarial case the reviewer flagged: the
+    chained-attribute rule must be gated on the chain root having
+    established model provenance, not merely on the leaf field name
+    matching a model field."""
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from django.db import models\n\n\nclass Tour(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n",
+    )
+    _write(
+        tmp_path,
+        "tours/services.py",
+        "class HttpResponse:\n    def __init__(self):\n        self.tour = None\n\n\n"
+        "def check(bar):\n"
+        "    return bar.tour.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    assert _by_kind(addition, "django.field_access") == []
+    assert _by_kind(addition, "django.unresolved_field_access") == []
+
+
+def test_adversarial__service_method_chain_is_not_queryset(
+    tmp_path: Path, system_id: str
+) -> None:
+    """Precision: `result = some_service.get_tour()` then `result.status`.
+    Even though `status` is a model field name, `some_service` is not
+    going through `.objects` -- the queryset detection must NOT fire.
+    This prevents classifying arbitrary method calls as model-derived
+    just because their return value's attribute coincidentally matches."""
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from django.db import models\n\n\nclass Tour(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n",
+    )
+    _write(
+        tmp_path,
+        "tours/services.py",
+        "class TourService:\n    def get_tour(self): pass\n\n\n"
+        "def check():\n"
+        "    service = TourService()\n"
+        "    result = service.get_tour()\n"
+        "    return result.status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    assert _by_kind(addition, "django.field_access") == []
+    assert _by_kind(addition, "django.unresolved_field_access") == []
+
+
+def test_adversarial__inline_queryset_without_alias_is_correctly_silent(
+    tmp_path: Path, system_id: str
+) -> None:
+    """Precision: `Tour.objects.filter(...).first().status` (inline, no
+    local alias).  No local variable to anchor the detection on — this
+    would require value-tracking through the full call chain inline,
+    which is beyond the bounded analysis.  Correctly silent, not a
+    false disclosure."""
+    _write(
+        tmp_path,
+        "tours/models.py",
+        "from django.db import models\n\n\nclass Tour(models.Model):\n"
+        "    status = models.CharField(max_length=20)\n",
+    )
+    _write(
+        tmp_path,
+        "tours/services.py",
+        "from .models import Tour\n\n\n"
+        "def get_status():\n"
+        "    return Tour.objects.filter(active=True).first().status\n",
+    )
+    base = _base(tmp_path, system_id)
+    addition = DjangoAdapter().enrich(tmp_path, base, system_id=system_id, revision="rev1")
+
+    # Inline chain accesses are beyond the bounded analysis — correctly
+    # silent (no edge, no disclosure).  A future resolver expansion may
+    # choose to handle this, but the current disclosure fix is about
+    # local-variable-anchored patterns only.
+    assert _by_kind(addition, "django.field_access") == []
+    assert _by_kind(addition, "django.unresolved_field_access") == []
+

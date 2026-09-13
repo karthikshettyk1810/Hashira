@@ -1858,3 +1858,54 @@ Gates Phase 7. Copied here so it stays visible against the phase list above:
       against a real fixture repository, not just the resolver in isolation.
 - [x] Documentation includes adapter and extension rules — `ADAPTERS.md` now
       has a worked example (the Python adapter) rather than only a plan.
+
+### Coverage-disclosure fix: Django chained/local-alias field access
+
+**Provenance**: agent-value benchmark against the read-only Rider repository.
+Two independent treatment runs discovered the same failure mode; synthetic
+fixtures did not predict it.
+
+**The gap**: Django field-access resolution silently dropped two access
+patterns with *no limitation disclosure at all*:
+
+1. **Queryset local alias**: `tour = Tour.objects.filter(...).first()` then
+   `tour.status`. `_local_model_instances` only recognized `= ModelClass()`
+   (direct constructor); a queryset-method chain was not matched, so `tour`
+   was not in `local_instance_types` and the field access produced zero
+   output — no edge, no `django.unresolved_field_access`.
+2. **Chained attribute access**: `stop.tour.status` where `stop: Stop` is a
+   typed parameter of a known model. The intermediate `.tour` hop is
+   unresolvable (would require FK traversal); `resolve_expr` returned `None`
+   for the chain and the field access was silently dropped.
+
+**Why dangerous**: both patterns produce the most hazardous kind of failure —
+an agent sees an apparently complete impact result with no specific limitation
+warning for these boundaries, and concludes the returned graph is complete.
+This is worse than an openly reported gap.
+
+**The fix**: purely disclosure, no resolver expansion.
+
+- `_queryset_local_instances` (`adapter.py`): detects `name = Model.objects
+  .<method>(...)` narrowly (root must resolve to a known model, chain must
+  pass through `.objects` — Django's manager convention). Returns a set of
+  names for disclosure only.
+- `_chain_root_is_known_instance` (`adapter.py`): precision guard for chained
+  attribute access — only fires when the chain root is a name whose type is
+  a known model instance (`local_instance_types`), not for arbitrary chains
+  where the field name coincidentally matches.
+- Both patterns emit `django.unresolved_field_access` with
+  `LimitationKind.RETURN_VALUE_PROVENANCE` — the existing vocabulary that
+  already covers this semantics. No new `LimitationKind`, no new IR.
+
+**Precision measurement** (reviewer amendment): adversarial negative fixtures
+confirmed zero false disclosures for: `user.status` (unrelated object,
+coincidental field name), `bar.tour.status` (chain root not a known model),
+`service.get_tour()` then `result.status` (no `.objects` component).
+
+**Real-repository verification**: Rider indexing post-fix produces disclosure
+observations for the exact patterns identified (`qr_token_service.py`,
+`proximity_service.py`, `routing/reroute.py`, and others). Rider source code
+confirmed unmodified (`git status` clean).
+
+**Test counts**: 615 → 626 (9 positive regressions + 2 boundary-matrix).
+Ruff clean, mypy --strict clean.

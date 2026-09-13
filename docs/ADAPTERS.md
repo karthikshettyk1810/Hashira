@@ -545,6 +545,43 @@ the full account, including the real-repository verification: the new
 detection found 2 real, previously silent dynamic field accesses in the
 read-only benchmark's own codebase.
 
+**Coverage-disclosure fix: queryset local aliases and chained attribute
+access.** Two treatment runs independently discovered the same dangerous
+failure mode: Django field-access resolution silently drops certain
+chained/local-alias patterns with *no disclosed limitation at all*. An
+agent receiving an impact result sees no edge and no coverage warning for
+these specific access forms and may incorrectly conclude the graph is
+complete — the "silent false negative" that is more dangerous than an
+openly reported limitation.
+
+1. **Queryset local alias** (`tour = Tour.objects.filter(...).first()` then
+   `tour.status`): `_local_model_instances` only recognized `= ModelClass()`
+   (direct constructor); a queryset chain was not a constructor call, so the
+   local variable was not in `local_instance_types` and the subsequent field
+   access was silently dropped. Now detected by `_queryset_local_instances`,
+   narrowly gated on the `.objects` manager pattern (Django's own convention),
+   and disclosed as `RETURN_VALUE_PROVENANCE`.
+2. **Chained attribute access on a known model instance** (`stop.tour.status`
+   where `stop: Stop` is a typed parameter): the intermediate `.tour` hop is
+   unresolvable (would require FK traversal), but the chain root's model
+   provenance is established. Now detected by `_chain_root_is_known_instance`
+   and disclosed as `RETURN_VALUE_PROVENANCE`. The detection is precision-gated:
+   it only fires when the chain root is a name whose type is a known model
+   (not for arbitrary chains where the field name coincidentally matches),
+   preventing false disclosures for unrelated code like `bar.tour.status`
+   where `bar` is an HTTP response object.
+
+No new `LimitationKind` or IR vocabulary — `RETURN_VALUE_PROVENANCE` already
+covered this semantics (SQLAlchemy uses it for the identical structural gap).
+No resolver expansion — these patterns remain unresolved; only the disclosure
+was missing.
+
+Verified against Rider: the fix produces disclosure observations for the
+exact patterns the benchmark identified (`qr_token_service.py`,
+`proximity_service.py`, `routing/reroute.py`, and others). Adversarial
+precision tests confirm no false disclosures for coincidental field-name
+matches on unrelated objects.
+
 ## FastAPI adapter
 
 `src/hashira/adapters/fastapi/` — a second `FrameworkAdapter`, built to
