@@ -1910,26 +1910,34 @@ confirmed unmodified (`git status` clean).
 **Test counts**: 615 → 626 (9 positive regressions + 2 boundary-matrix).
 Ruff clean, mypy --strict clean.
 
-### R5: Agent-Native Graph Interface (MCP Projection Optimization)
+### R5: Agent-Native Graph Interface (Validated & Frozen)
 
-**Provenance**: Real-repository controlled benchmark on 248K LOC Django monolith (`OotaApp/backend`).
-Baseline vs Treatment comparison proved the core resolver was not the primary bottleneck, but agents
-suffered from N+1 round-trip hydration (`get_relationships` returning opaque IDs) and payload bloating
-in raw path trees.
+**Milestone Thesis**: *R5 demonstrated that decision-oriented projections, rather than additional graph primitives, materially improve an agent's ability to consume Hashira's knowledge.*
+
+**Provenance & Methodology**: Controlled 3-task usability benchmark on a 248K LOC Django monolith (`OotaApp/backend`), comparing the frozen R4 surface against the R5 surface under identical model, prompts, and read-only repository revision.
 
 **Capabilities Implemented**:
 1. **`get_entity_neighborhood`** (Tool):
    - Computes 1-hop semantic environment in exactly 1 MCP call.
    - Hydrates compact neighbor entities (`id`, `name`, `qualified_name`, `type`) without full Entity dump overhead.
    - Attaches edge type, confidence, compact source-location evidence (`file`, `line`), and coverage limitations.
-   - Batch fetches neighbor entities and evidence from UOW, eliminating N+1 DB round-trips.
+   - Batch-fetches neighbor entities and evidence from UOW, eliminating N+1 DB round-trips.
 2. **Semantic `summarize_impact`** (Tool Enhancement):
    - Projections categorized by semantic edge roles: `direct_callers`, `direct_callees`, `readers`, `writers`,
      `framework_boundaries`, and `indirect_dependencies`, alongside directory-level `groups`.
    - Coverage-first structure (`coverage.status` and `coverage.limitations` prominent).
-   - Preserves relationship IDs, confidence, and source location evidence without duplicate entity dumps.
+   - Preserves relationship IDs, confidence, and source-location evidence without duplicate entity dumps.
+
+**Controlled Benchmark Results**:
+- **Tool-call efficiency**: 13 → 4 MCP calls across evaluated tasks (-69.2%).
+- **Payload compression**: 226.9 KB → 23.6 KB total response payload (-89.6%).
+- **Agent trust**: 100% of post-Hashira source accesses were classified as `IMPLEMENTATION`; zero `VERIFICATION`, `AMBIGUITY`, or `GAP_FILL` lookups were required.
+- **Coverage comprehension**: Coverage status (`PARTIAL` vs `COMPLETE`) and specific limitation categories were correctly interpreted in all three evaluated tasks.
+- **`find_paths` status**: **NOT EARNED**. Zero `MANUAL_STITCHING`, zero `GREP_FALLBACK`, and zero stuck investigations occurred; indirect dependency summaries and neighborhood queries fully satisfied multi-hop reasoning.
+- **Scope caveat**: Results reflect a controlled 3-task benchmark on the `OotaApp` monolithic repository; not a universal claim across all codebase topologies.
 
 **Quality Gates & Verification**:
-- Unit & MCP Protocol tests: 626 → 627 passing tests (100%).
-- Ruff clean, mypy --strict clean across 68 source files.
-- Validated on real benchmark repositories (`OotaApp/backend` and `Rider`); 0 repository mutations.
+- Unit & MCP Protocol tests: 627 passing tests (100%).
+- Ruff clean, mypy --strict clean across all 68 source files.
+- Validated against read-only repositories (`OotaApp/backend` and `Rider`); 0 repository mutations.
+- Surface frozen at commit `133a435`.
