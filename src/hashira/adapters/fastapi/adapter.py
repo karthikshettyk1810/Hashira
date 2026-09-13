@@ -48,7 +48,7 @@ only one level of prefix -- see `_composed_prefix`).
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -221,6 +221,7 @@ class FastAPIAdapter:
         # every function/method in every module -- a dependency function can
         # itself take further dependencies, so this is not limited to
         # functions already known to be route handlers.
+        current_routes: list[dict[str, object]] = []
         for module_qn, file_rel in index.module_file.items():
             tree = trees.get(file_rel)
             if tree is None:
@@ -236,6 +237,16 @@ class FastAPIAdapter:
                         route.response_model_qualified_name, index
                     ):
                         response_qn = route.response_model_qualified_name
+                    current_routes.append(
+                        {
+                            "file": file_rel,
+                            "var_qualified_name": var_qn,
+                            "http_method": method,
+                            "path": full_path,
+                            "handler_qualified_name": func_qn,
+                            "line": func_node.lineno,
+                        }
+                    )
                     result.observations.append(
                         _emit(
                             result,
@@ -273,6 +284,35 @@ class FastAPIAdapter:
                             now=now,
                         )
                     )
+
+        # Pass 4: detect framework route evolutions across revisions where a
+        # file was MODIFIED and a route on a stable handler/router/method changed path.
+        for rename in _detect_route_renames(
+            base.observations,
+            apps_and_routers=apps_and_routers,
+            includes=includes,
+            index=index,
+            local_names_by_module=local_names_by_module,
+            current_routes=current_routes,
+        ):
+            line_val = rename.get("line")
+            line_num = line_val if isinstance(line_val, int) else None
+            result.observations.append(
+                _emit(
+                    result,
+                    system_id=system_id,
+                    kind="fastapi.declaration_rename",
+                    payload=rename,
+                    summary=(
+                        f"Route {rename['http_method']} {rename['old_path']} evolved to "
+                        f"{rename['http_method']} {rename['new_path']} for handler "
+                        f"{rename['handler_qualified_name']}"
+                    ),
+                    file=str(rename.get("file", "")),
+                    line=line_num,
+                    now=now,
+                )
+            )
 
         return result
 
@@ -536,3 +576,113 @@ def _emit(
         evidence_ids=[evidence.id],
         observed_at=now,
     )
+
+
+def _detect_route_renames(
+    observations: Sequence[Observation],
+    *,
+    apps_and_routers: dict[str, _AppOrRouter],
+    includes: list[_Include],
+    index: PythonIndex,
+    local_names_by_module: dict[str, set[str]],
+    current_routes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """For each file that was `MODIFIED` in Git history, re-parse the file's old
+    content and extract route declarations.
+
+    A route evolution is proposed when:
+    * The router variable qualified name matches (`var_qualified_name`)
+    * The HTTP method matches (`http_method`)
+    * The handler function qualified name matches (`handler_qualified_name`)
+    * The route path changed (`old_full_path != new_full_path`)
+
+    If the handler, router, or method changed, or if there is ambiguity, no rename
+    fact is emitted.
+    """
+    old_content_by_file: dict[str, str] = {}
+    for obs in observations:
+        if obs.kind != "git.file_change" or obs.payload.get("status") != "MODIFIED":
+            continue
+        old_content = obs.payload.get("old_content")
+        path = obs.payload.get("path")
+        if isinstance(old_content, str) and isinstance(path, str):
+            old_content_by_file[path] = old_content
+    if not old_content_by_file:
+        return []
+
+    current_by_anchor: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    for r in current_routes:
+        file_rel = str(r["file"])
+        var_qn = str(r["var_qualified_name"])
+        method = str(r["http_method"])
+        handler_qn = str(r["handler_qualified_name"])
+        current_by_anchor[(file_rel, var_qn, method, handler_qn)] = r
+
+    renames: list[dict[str, object]] = []
+
+    for file_rel, old_content in old_content_by_file.items():
+        module_qn = next((m for m, f in index.module_file.items() if f == file_rel), None)
+        if module_qn is None:
+            continue
+        try:
+            old_tree = ast.parse(old_content)
+        except SyntaxError:
+            continue
+
+        ctx = _augmented_context(index, module_qn, local_names_by_module)
+        old_apps_routers = dict(apps_and_routers)
+        for var_name, info in _find_app_and_router_instances(old_tree, ctx):
+            var_qn = f"{module_qn}.{var_name}"
+            old_apps_routers[var_qn] = info
+
+        old_routes: list[dict[str, object]] = []
+        for func_qn, func_node in _walk_functions(old_tree, module_qn):
+            route = _match_route_decorator(func_node, ctx, old_apps_routers)
+            if route is not None:
+                method, var_qn, path = route.method, route.var_qualified_name, route.path
+                full_path = _composed_prefix(var_qn, old_apps_routers, includes) + path
+                old_routes.append(
+                    {
+                        "file": file_rel,
+                        "var_qualified_name": var_qn,
+                        "http_method": method,
+                        "path": full_path,
+                        "handler_qualified_name": func_qn,
+                        "line": func_node.lineno,
+                    }
+                )
+
+        for old_r in old_routes:
+            var_qn = str(old_r["var_qualified_name"])
+            method = str(old_r["http_method"])
+            handler_qn = str(old_r["handler_qualified_name"])
+            old_full_path = str(old_r["path"])
+
+            anchor = (file_rel, var_qn, method, handler_qn)
+            new_r = current_by_anchor.get(anchor)
+            if new_r is None:
+                continue
+
+            new_full_path = str(new_r["path"])
+            if old_full_path == new_full_path:
+                continue
+
+            old_route_qn = f"{var_qn}:{method} {old_full_path}"
+            new_route_qn = f"{var_qn}:{method} {new_full_path}"
+
+            renames.append(
+                {
+                    "container_qualified_name": var_qn,
+                    "old_qualified_name": old_route_qn,
+                    "new_qualified_name": new_route_qn,
+                    "shape_matched": True,
+                    "old_path": old_full_path,
+                    "new_path": new_full_path,
+                    "handler_qualified_name": handler_qn,
+                    "http_method": method,
+                    "file": file_rel,
+                    "line": new_r.get("line"),
+                }
+            )
+
+    return renames

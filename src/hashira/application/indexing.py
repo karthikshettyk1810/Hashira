@@ -294,6 +294,7 @@ class IndexingService:
         # snapshot of the result so far; each adapter's `enrich()` returns
         # only its own additions (see adapters/django/adapter.py), which get
         # folded into the same running lists everything else here uses.
+        declaration_renames: list[DeclarationRename] = []
         for framework_adapter in self._framework_adapters:
             base = ExtractionResult(
                 observations=list(all_observations), evidence=list(all_evidence)
@@ -302,13 +303,13 @@ class IndexingService:
             all_observations.extend(addition.observations)
             all_evidence.extend(addition.evidence)
             errors.extend(addition.errors)
+            declaration_renames.extend(_extract_declaration_renames(addition.observations))
 
         # Data adapters enrich the same running result, after framework
         # adapters -- but must not depend on one having run. A DataAdapter's
         # whole point is to mean the same thing whether or not any
         # framework adapter is even configured (see ports/adapters.py's
         # `DataAdapter` docstring).
-        declaration_renames: list[DeclarationRename] = []
         for data_adapter in self._data_adapters:
             base = ExtractionResult(
                 observations=list(all_observations), evidence=list(all_evidence)
@@ -593,9 +594,9 @@ def _extract_coverage_limitation_kinds(observations: Sequence[Observation]) -> d
 
 
 def _extract_declaration_renames(observations: Sequence[Observation]) -> list[DeclarationRename]:
-    """Pull `DeclarationRename` value objects out of a `DataAdapter`'s raw
-    ``*.declaration_rename`` observations (today, only
-    `adapters.sqlalchemy.adapter`'s) — the shape
+    """Pull `DeclarationRename` value objects out of raw
+    ``*.declaration_rename`` observations (from `DataAdapter`s or
+    `FrameworkAdapter`s) — the shape
     `identity.attach_declaration_lineage_evidence` actually wants, decoupled
     from any one adapter's payload dict layout, exactly like `_extract_renames`
     above does for Git's own rename evidence."""
@@ -603,22 +604,39 @@ def _extract_declaration_renames(observations: Sequence[Observation]) -> list[De
     for obs in observations:
         if not obs.kind.endswith(".declaration_rename"):
             continue
+        container_qn = obs.payload.get("container_qualified_name")
+        old_qn = obs.payload.get("old_qualified_name")
+        new_qn = obs.payload.get("new_qualified_name")
+        if isinstance(container_qn, str) and isinstance(old_qn, str) and isinstance(new_qn, str):
+            confidence = (
+                Confidence.CERTAIN if obs.payload.get("shape_matched", True) else Confidence.LIKELY
+            )
+            renames.append(
+                DeclarationRename(
+                    container_qualified_name=container_qn,
+                    old_qualified_name=old_qn,
+                    new_qualified_name=new_qn,
+                    confidence=confidence,
+                )
+            )
+            continue
         table = obs.payload.get("table_name")
         old_field = obs.payload.get("old_field_name")
         new_field = obs.payload.get("new_field_name")
-        if not (
+        if (
             isinstance(table, str) and isinstance(old_field, str) and isinstance(new_field, str)
         ):
-            continue
-        confidence = Confidence.CERTAIN if obs.payload.get("shape_matched") else Confidence.LIKELY
-        renames.append(
-            DeclarationRename(
-                container_qualified_name=table,
-                old_qualified_name=f"{table}.{old_field}",
-                new_qualified_name=f"{table}.{new_field}",
-                confidence=confidence,
+            confidence = (
+                Confidence.CERTAIN if obs.payload.get("shape_matched") else Confidence.LIKELY
             )
-        )
+            renames.append(
+                DeclarationRename(
+                    container_qualified_name=table,
+                    old_qualified_name=f"{table}.{old_field}",
+                    new_qualified_name=f"{table}.{new_field}",
+                    confidence=confidence,
+                )
+            )
     return renames
 
 
