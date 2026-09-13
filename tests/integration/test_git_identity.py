@@ -323,7 +323,7 @@ def test_replacement_disguised_as_a_rename_is_not_linked(
     service.index(repo, system_id=system.id, revision=git_repo.current_revision())
 
     by_qn = _entities_by_qn(db, system.id)
-    assert by_qn["shop.payments.PaymentService"][0].status is EntityStatus.ACTIVE  # orphaned
+    assert by_qn["shop.payments.PaymentService"][0].status is EntityStatus.REMOVED
     assert "shop.billing.UnrelatedThing" in by_qn
     assert by_qn["shop.billing.UnrelatedThing"][0].status is EntityStatus.ACTIVE
 

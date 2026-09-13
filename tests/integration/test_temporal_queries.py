@@ -288,15 +288,16 @@ def test_identity_lineage_survives_a_rename_across_revisions(
 
     # Adversarial case, now checked *through the revision-scoped query*: the
     # disguised rename of models.py must never produce a lineage edge, at D
-    # or afterwards -- the old Payment entity is orphaned, not superseded,
-    # exactly like the un-revisioned case in test_git_identity.py.
+    # or afterwards -- the old Payment entity was removed at D, not superseded.
     payment_qn = "payments.models.Payment"
+    assert hist_a.entity(payment_qn) is not None
+    assert hist_b.entity(payment_qn) is not None
+    assert hist_c.entity(payment_qn) is not None
+    payment_a_id = hist_a.entity(payment_qn).id  # type: ignore
     for hist in (hist_d, hist_current):
-        payment = hist.entity(payment_qn)
-        assert payment is not None, hist.revision
-        assert payment.status is EntityStatus.ACTIVE
+        assert hist.entity(payment_qn) is None, hist.revision
         assert not any(
-            rel.type is RelationshipType.SUPERSEDES and rel.target_entity_id == payment.id
+            rel.type is RelationshipType.SUPERSEDES and rel.target_entity_id == payment_a_id
             for rel in hist.relationships
         )
     # And the entity introduced by the disguised rewrite must not be

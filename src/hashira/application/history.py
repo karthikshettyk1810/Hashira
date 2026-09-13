@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..core.entities import Entity
-from ..core.enums import RelationshipType
+from ..core.enums import EntityStatus, RelationshipType
 from ..core.ids import SystemID
 from ..core.relationships import Relationship
 from ..core.revisions import RevisionGraph
@@ -84,7 +84,11 @@ def query_at_revision(
     ]
 
     if revision is None:
-        entities = [e for e in all_entities if e.status.value != "SUPERSEDED"]
+        entities = [
+            e
+            for e in all_entities
+            if e.status not in (EntityStatus.SUPERSEDED, EntityStatus.REMOVED)
+        ]
         relationships = [rel for rel in all_relationships if rel.is_current]
         return _bounded(revision, entities, relationships)
 
@@ -99,7 +103,13 @@ def query_at_revision(
         if not graph.is_ancestor_or_self(entity.first_seen_revision, revision):
             return False
         closed_at = superseded_at.get(entity.id)
-        return closed_at is None or not graph.is_ancestor_or_self(closed_at, revision)
+        if closed_at is not None and graph.is_ancestor_or_self(closed_at, revision):
+            return False
+        return not (
+            entity.status is EntityStatus.REMOVED
+            and isinstance(entity.metadata.get("removed_at_revision"), str)
+            and graph.is_ancestor_or_self(str(entity.metadata["removed_at_revision"]), revision)
+        )
 
     def relationship_present(rel: Relationship) -> bool:
         if rel.valid_from_revision is None:

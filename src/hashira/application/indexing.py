@@ -144,8 +144,9 @@ from pathlib import Path
 from typing import Protocol
 
 from .. import identity
+from ..core.base import utc_now
 from ..core.entities import Entity
-from ..core.enums import Confidence, RelationshipType, SnapshotStatus
+from ..core.enums import Confidence, EntityStatus, RelationshipType, SnapshotStatus
 from ..core.events import Event
 from ..core.evidence import Evidence, Inference, Observation
 from ..core.ids import SystemID
@@ -428,6 +429,35 @@ class IndexingService:
             if outcome.inference is not None:
                 ambiguity_inferences.append(outcome.inference)
 
+        # Entity Removal Reconciliation: Any previously ACTIVE entity whose source
+        # file was deleted in this revision (per git.file_change DELETED facts)
+        # and has no replacement candidate is marked REMOVED.
+        deleted_files = _extract_deleted_files(observations)
+        resolved_ids = {e.id for e in resolved_entities}
+        superseded_ids = {e.id for e in superseded_entities}
+        removed_entities: list[Entity] = []
+        now = utc_now()
+        for existing_e in existing_pool:
+            if (
+                existing_e.status is EntityStatus.ACTIVE
+                and existing_e.id not in resolved_ids
+                and existing_e.id not in superseded_ids
+            ):
+                file_rel = existing_e.source.file if existing_e.source else None
+                if file_rel and file_rel in deleted_files:
+                    updated_meta = dict(existing_e.metadata)
+                    if revision:
+                        updated_meta["removed_at_revision"] = revision
+                    removed_e = existing_e.model_copy(
+                        update={
+                            "status": EntityStatus.REMOVED,
+                            "metadata": updated_meta,
+                            "updated_at": now,
+                        }
+                    )
+                    removed_entities.append(removed_e)
+                    existing_by_id[removed_e.id] = removed_e
+
         # Recomputed fresh every run, never accumulated: a provenance form
         # this pipeline later learns to resolve must drop a column's kinds
         # back to empty, not leave a stale one from a prior run standing.
@@ -468,7 +498,7 @@ class IndexingService:
             uow.events.append_many(events)
         if revisions:
             uow.revisions.record(revisions)
-        uow.graph.upsert_entities([*resolved_entities, *superseded_entities])
+        uow.graph.upsert_entities([*resolved_entities, *superseded_entities, *removed_entities])
         uow.graph.upsert_relationships([*to_insert, *lineage_relationships])
         if stale_ids:
             uow.graph.close_relationships(stale_ids, revision=revision or "unknown")
@@ -568,6 +598,17 @@ def _extract_renames(observations: Sequence[Observation]) -> list[GitRename]:
                 GitRename(old_path=old_path, new_path=new_path, similarity=float(similarity))
             )
     return renames
+
+
+def _extract_deleted_files(observations: Sequence[Observation]) -> set[str]:
+    """Pull file paths that were DELETED out of raw ``git.file_change`` observations."""
+    deleted: set[str] = set()
+    for obs in observations:
+        if obs.kind == "git.file_change" and obs.payload.get("status") == "DELETED":
+            path = obs.payload.get("path")
+            if isinstance(path, str):
+                deleted.add(path)
+    return deleted
 
 
 def _extract_coverage_limitation_kinds(observations: Sequence[Observation]) -> dict[str, set[str]]:
