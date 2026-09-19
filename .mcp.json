@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "hashira": {
+      "command": "/Users/karthikshettyk/Desktop/Karthik/Hashira/.venv/bin/hashira",
+      "args": [
+        "mcp",
+        "--db",
+        "/Users/karthikshettyk/Desktop/oota.app-rider-v2/.hashira/hashira_verify.db",
+        "--system",
+        "oota-rider-verify"
+      ]
+    }
+  }
+}
