@@ -94,6 +94,13 @@ def _symbol_entity(obs: Observation, *, system_id: SystemID, revision: str | Non
     qn = str(obs.payload["qualified_name"])
     file = str(obs.payload["file"])
     kind = str(obs.payload["kind"])
+    metadata = {
+        "kind": obs.payload["kind"],
+        "parent_kind": obs.payload["parent_kind"],
+        "decorators": obs.payload["decorators"],
+    }
+    if "parameters" in obs.payload:
+        metadata["parameters"] = obs.payload["parameters"]
     return Entity(
         system_id=system_id,
         type=EntityType.SYMBOL,
@@ -106,11 +113,7 @@ def _symbol_entity(obs: Observation, *, system_id: SystemID, revision: str | Non
             line_end=int(obs.payload["line_end"]),  # type: ignore[call-overload]
         ),
         technology=TechnologyInfo(language="python"),
-        metadata={
-            "kind": obs.payload["kind"],
-            "parent_kind": obs.payload["parent_kind"],
-            "decorators": obs.payload["decorators"],
-        },
+        metadata=metadata,
         identity_claims=[
             qualified_name_claim(qn),
             declaration_anchor_claim(file, qn, kind),

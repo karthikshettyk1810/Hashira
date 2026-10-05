@@ -135,6 +135,52 @@ def test_simple_rename_produces_supersedes_lineage_not_an_orphan(
     assert "shop.payments.PaymentService.process" not in current_calls
 
 
+def test_file_and_class_rename_with_unchanged_methods_produces_class_lineage(
+    repo: Path, db: MemoryDatabase, system: System
+) -> None:
+    git_repo = GitRepository(repo)
+    source = (
+        "class ScanStore:\n"
+        "    def record_vulnerability(self, vulnerability):\n"
+        "        self.vulnerability = vulnerability\n\n"
+        "    def set_final_scan_result(self, result):\n"
+        "        self.final_result = result\n\n"
+        "    def get_report_data(self):\n"
+        '        return {"vulnerability": self.vulnerability}\n\n'
+        "    def get_total_stats(self):\n"
+        '        return {"count": 1}\n'
+    )
+    old_file = repo / "src" / "strix" / "telemetry" / "scan_store.py"
+    old_file.parent.mkdir(parents=True)
+    old_file.write_text(source)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "define ScanStore")
+
+    service = _service(db)
+    service.index(repo, system_id=system.id, revision=git_repo.current_revision())
+
+    (repo / "src" / "strix" / "report").mkdir(parents=True)
+    _git(
+        repo,
+        "mv",
+        "src/strix/telemetry/scan_store.py",
+        "src/strix/report/state.py",
+    )
+    new_file = repo / "src" / "strix" / "report" / "state.py"
+    new_file.write_text(source.replace("ScanStore", "ReportState"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "rename ScanStore to ReportState")
+    service.index(repo, system_id=system.id, revision=git_repo.current_revision())
+
+    by_qn = _entities_by_qn(db, system.id)
+    assert by_qn["strix.report.state.ReportState"][0].status is EntityStatus.ACTIVE
+    assert by_qn["strix.telemetry.scan_store.ScanStore"][0].status is EntityStatus.SUPERSEDED
+    assert (
+        "strix.report.state.ReportState",
+        "strix.telemetry.scan_store.ScanStore",
+    ) in _lineage(db, system.id)
+
+
 def test_a_later_unrelated_reindex_does_not_close_the_lineage_edge(
     repo: Path, db: MemoryDatabase, system: System
 ) -> None:

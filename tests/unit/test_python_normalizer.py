@@ -48,6 +48,33 @@ def test_module_defines_class_defines_method(tmp_path: Path) -> None:
     ) in pairs
 
 
+def test_method_parameter_kinds_and_names_are_preserved(tmp_path: Path) -> None:
+    system_id = new_id(IDPrefix.SYSTEM)
+    observations = _extract_all(
+        tmp_path,
+        {
+            "shop/payments.py": (
+                "class PaymentService:\n"
+                "    def process(self, /, payment, *events, timeout, **options):\n"
+                "        pass\n"
+            )
+        },
+        system_id,
+    )
+    run = normalize(observations, system_id=system_id, revision="rev1")
+    method = next(
+        e for e in run.entities if e.qualified_name == "shop.payments.PaymentService.process"
+    )
+
+    assert method.metadata["parameters"] == [
+        {"kind": "positional_only", "name": "self"},
+        {"kind": "positional_or_keyword", "name": "payment"},
+        {"kind": "var_positional", "name": "events"},
+        {"kind": "keyword_only", "name": "timeout"},
+        {"kind": "var_keyword", "name": "options"},
+    ]
+
+
 def test_cross_file_call_becomes_a_relationship_only_when_the_target_exists(tmp_path: Path) -> None:
     system_id = new_id(IDPrefix.SYSTEM)
     observations = _extract_all(

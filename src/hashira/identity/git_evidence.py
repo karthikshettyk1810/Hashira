@@ -19,16 +19,16 @@ forces the resolver's hand.
 
 A file rename pairs cleanly at the module level — there is exactly one
 module entity per file, so `old_path`/`new_path` alone is enough. Within a
-moved file, a symbol only gets paired with its counterpart when the two share
-the exact same simple name and that pairing is unambiguous (exactly one
-candidate, exactly one existing entity with that name, on either side of the
-move). If a symbol was *also* renamed as part of the move — the case the
-design discussion called out as "the really interesting one" — there is
-nothing here to pair it on, and it is left alone: no claim, no guess, and
-the resolver's existing behavior (a disconnected `NEW`, per
-`adapters/python/normalizer.py`) stands. That is the correct, conservative
-answer when the only two signals available (path and name) both changed at
-once.
+moved file, a symbol is paired by exact simple-name equality when that
+pairing is unambiguous (exactly one candidate, exactly one existing entity
+with that name, on either side of the move). When the class name also changed,
+we still allow a symbol-level claim only if there is exactly one relevant
+top-level class on each side and its direct method names and parameter
+signatures are an exact match, which is enough to preserve a legitimate Git
+rename without turning the rename layer into a fuzzy similarity system.
+If the file move is ambiguous or the structural invariants do not match, the
+symbol is left alone: no claim, no guess, and the resolver's existing
+behavior (a disconnected `NEW`, per `adapters/python/normalizer.py`) stands.
 """
 
 from __future__ import annotations
@@ -103,14 +103,70 @@ def _pair_modules(
     existing[old_modules[0].id] = _with_claim(old_modules[0], claim)
 
 
+def _top_level_classes(symbols: list[Entity]) -> list[Entity]:
+    return [
+        entity
+        for entity in symbols
+        if entity.metadata.get("kind") == "class" and entity.metadata.get("parent_kind") == "module"
+    ]
+
+
+def _method_signature(
+    class_entity: Entity, symbols: list[Entity]
+) -> tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] | None:
+    """Return exact direct method names and parameter names/kinds for a class.
+
+    Missing or malformed parameter metadata is insufficient evidence; this
+    deliberately fails closed rather than comparing only whatever fields
+    happened to be present.
+    """
+    class_qn = class_entity.qualified_name
+    if class_qn is None:
+        return None
+
+    members: list[tuple[str, str, tuple[tuple[str, str], ...]]] = []
+    for entity in symbols:
+        qualified_name = entity.qualified_name
+        metadata = entity.metadata
+        method_kind = metadata.get("kind")
+        if (
+            qualified_name is None
+            or not qualified_name.startswith(f"{class_qn}.")
+            or "." in qualified_name[len(class_qn) + 1 :]
+            or metadata.get("parent_kind") != "class"
+            or not isinstance(method_kind, str)
+            or method_kind not in {"method", "async_function"}
+        ):
+            continue
+
+        raw_parameters = metadata.get("parameters")
+        if not isinstance(raw_parameters, list):
+            return None
+        parameters: list[tuple[str, str]] = []
+        for parameter in raw_parameters:
+            if not isinstance(parameter, dict):
+                return None
+            kind, name = parameter.get("kind"), parameter.get("name")
+            if not isinstance(kind, str) or not isinstance(name, str):
+                return None
+            parameters.append((kind, name))
+        members.append((entity.name, method_kind, tuple(parameters)))
+
+    if not members or len({name for name, _, _ in members}) != len(members):
+        return None
+    return tuple(sorted(members))
+
+
 def _pair_symbols(
     candidates: dict[str, Entity], existing: dict[str, Entity], rename: GitRename
 ) -> None:
+    new_symbols = _by_file(candidates, EntityType.SYMBOL, rename.new_path)
+    old_symbols = _by_file(existing, EntityType.SYMBOL, rename.old_path)
     new_by_name: dict[str, list[Entity]] = {}
-    for entity in _by_file(candidates, EntityType.SYMBOL, rename.new_path):
+    for entity in new_symbols:
         new_by_name.setdefault(entity.name, []).append(entity)
     old_by_name: dict[str, list[Entity]] = {}
-    for entity in _by_file(existing, EntityType.SYMBOL, rename.old_path):
+    for entity in old_symbols:
         old_by_name.setdefault(entity.name, []).append(entity)
 
     for name, new_matches in new_by_name.items():
@@ -120,6 +176,24 @@ def _pair_symbols(
         claim = _claim(f"symbol::{rename.old_path}::{rename.new_path}::{name}", rename.similarity)
         candidates[new_matches[0].id] = _with_claim(new_matches[0], claim)
         existing[old_matches[0].id] = _with_claim(old_matches[0], claim)
+
+    new_classes = _top_level_classes(new_symbols)
+    old_classes = _top_level_classes(old_symbols)
+    if len(new_classes) == 1 and len(old_classes) == 1:
+        new_class = new_classes[0]
+        old_class = old_classes[0]
+        if new_class.name == old_class.name:
+            return
+        old_members = _method_signature(old_class, old_symbols)
+        new_members = _method_signature(new_class, new_symbols)
+        if old_members is None or new_members is None or old_members != new_members:
+            return
+        claim = _claim(
+            f"symbol::{rename.old_path}::{rename.new_path}::{old_class.name}->{new_class.name}",
+            rename.similarity,
+        )
+        candidates[new_class.id] = _with_claim(new_class, claim)
+        existing[old_class.id] = _with_claim(old_class, claim)
 
 
 def attach_rename_evidence(

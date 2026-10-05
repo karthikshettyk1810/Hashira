@@ -628,23 +628,35 @@ class _Walker:
             "async_function" if is_async else ("method" if parent_kind == "class" else "function")
         )
         decorators = [ast.unparse(dec) for dec in node.decorator_list]
+        parameters = [
+            *({"kind": "positional_only", "name": arg.arg} for arg in node.args.posonlyargs),
+            *({"kind": "positional_or_keyword", "name": arg.arg} for arg in node.args.args),
+        ]
+        if node.args.vararg is not None:
+            parameters.append({"kind": "var_positional", "name": node.args.vararg.arg})
+        parameters.extend({"kind": "keyword_only", "name": arg.arg} for arg in node.args.kwonlyargs)
+        if node.args.kwarg is not None:
+            parameters.append({"kind": "var_keyword", "name": node.args.kwarg.arg})
+        payload = {
+            "kind": symbol_kind,
+            "name": node.name,
+            "qualified_name": qualified_name,
+            "parent_qualified_name": parent_qualified_name,
+            "parent_kind": parent_kind,
+            "module_qualified_name": self.module_qn,
+            "file": self.rel_file,
+            "decorators": decorators,
+            "bases": [],
+            "line_start": node.lineno,
+            "line_end": node.end_lineno or node.lineno,
+            "col_start": node.col_offset,
+            "col_end": node.end_col_offset or node.col_offset,
+        }
+        if parent_kind == "class":
+            payload["parameters"] = parameters
         self._emit(
             kind="python.symbol",
-            payload={
-                "kind": symbol_kind,
-                "name": node.name,
-                "qualified_name": qualified_name,
-                "parent_qualified_name": parent_qualified_name,
-                "parent_kind": parent_kind,
-                "module_qualified_name": self.module_qn,
-                "file": self.rel_file,
-                "decorators": decorators,
-                "bases": [],
-                "line_start": node.lineno,
-                "line_end": node.end_lineno or node.lineno,
-                "col_start": node.col_offset,
-                "col_end": node.end_col_offset or node.col_offset,
-            },
+            payload=payload,
             summary=f"{symbol_kind} {qualified_name}",
             line=node.lineno,
             col=node.col_offset,

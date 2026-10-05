@@ -117,31 +117,138 @@ def test_symbol_with_unchanged_name_pairs_across_the_move(system: System) -> Non
     assert module_claim != new_symbol_claims
 
 
-def test_symbol_renamed_during_the_move_gets_no_claim(system: System) -> None:
-    """The adversarial case this design discussion called "the really
-    interesting one": the file moved AND the symbol's name changed. Path and
-    name are the only two things to pair on, and both changed at once --
-    nothing here justifies connecting them, so neither gets a GIT_RENAME
-    claim. They fall back to whatever the resolver already does (a
-    disconnected NEW), which is correct."""
+def test_renamed_class_pairs_from_its_exact_method_signatures(system: System) -> None:
+    old_path = "strix/telemetry/scan_store.py"
+    new_path = "strix/report/state.py"
+    old_module = _module(system, old_path, "strix.telemetry.scan_store")
+    new_module = _module(system, new_path, "strix.report.state")
+    old_class = _symbol(system, old_path, "ScanStore", "strix.telemetry.scan_store.ScanStore")
+    new_class = _symbol(system, new_path, "ReportState", "strix.report.state.ReportState")
+    old_class.metadata = {"kind": "class", "parent_kind": "module"}
+    new_class.metadata = {"kind": "class", "parent_kind": "module"}
+    method_specs = [
+        (
+            "record_vulnerability",
+            [
+                {"kind": "positional_or_keyword", "name": "self"},
+                {"kind": "positional_or_keyword", "name": "vulnerability"},
+            ],
+        ),
+        (
+            "set_final_scan_result",
+            [
+                {"kind": "positional_or_keyword", "name": "self"},
+                {"kind": "positional_or_keyword", "name": "result"},
+            ],
+        ),
+        ("get_report_data", [{"kind": "positional_or_keyword", "name": "self"}]),
+        ("get_total_stats", [{"kind": "positional_or_keyword", "name": "self"}]),
+    ]
+    old_methods = [
+        _symbol(system, old_path, name, f"{old_class.qualified_name}.{name}")
+        for name, _parameters in method_specs
+    ]
+    new_methods = [
+        _symbol(system, new_path, name, f"{new_class.qualified_name}.{name}")
+        for name, _parameters in method_specs
+    ]
+    for entity in old_methods:
+        entity.metadata = {
+            "kind": "method",
+            "parent_kind": "class",
+            "parameters": next(params for name, params in method_specs if name == entity.name),
+        }
+    for entity in new_methods:
+        entity.metadata = {
+            "kind": "method",
+            "parent_kind": "class",
+            "parameters": next(params for name, params in method_specs if name == entity.name),
+        }
+    rename = GitRename(old_path=old_path, new_path=new_path, similarity=1.0)
+
+    candidates, existing = attach_rename_evidence(
+        [new_module, new_class, *new_methods],
+        [old_module, old_class, *old_methods],
+        [rename],
+    )
+    by_id = {entity.id: entity for entity in [*candidates, *existing]}
+
+    assert _claims_of(by_id[new_class.id], IdentityClaimKind.GIT_RENAME) != []
+    assert _claims_of(by_id[old_class.id], IdentityClaimKind.GIT_RENAME) != []
+
+
+def test_renamed_class_with_mismatched_method_parameters_gets_no_claim(system: System) -> None:
+    old_path, new_path = "shop/payments.py", "shop/billing.py"
+    old_class = _symbol(system, old_path, "PaymentService", "shop.payments.PaymentService")
+    new_class = _symbol(system, new_path, "BillingService", "shop.billing.BillingService")
+    old_class.metadata = {"kind": "class", "parent_kind": "module"}
+    new_class.metadata = {"kind": "class", "parent_kind": "module"}
+    old_method = _symbol(system, old_path, "process", "shop.payments.PaymentService.process")
+    new_method = _symbol(system, new_path, "process", "shop.billing.BillingService.process")
+    old_method.metadata = {
+        "kind": "method",
+        "parent_kind": "class",
+        "parameters": [{"kind": "positional_or_keyword", "name": "payment"}],
+    }
+    new_method.metadata = {
+        "kind": "method",
+        "parent_kind": "class",
+        "parameters": [{"kind": "positional_or_keyword", "name": "invoice"}],
+    }
+    rename = GitRename(old_path=old_path, new_path=new_path, similarity=1.0)
+
+    candidates, existing = attach_rename_evidence(
+        [new_class, new_method], [old_class, old_method], [rename]
+    )
+    by_id = {entity.id: entity for entity in [*candidates, *existing]}
+
+    assert _claims_of(by_id[new_class.id], IdentityClaimKind.GIT_RENAME) == []
+    assert _claims_of(by_id[old_class.id], IdentityClaimKind.GIT_RENAME) == []
+
+
+def test_multiple_renamed_symbol_candidates_do_not_pair_when_ambiguous(system: System) -> None:
+    """A moved file with more than one candidate on either side is not safe to
+    pair by rename history alone; we must refuse to guess."""
     old_module = _module(system, "shop/payments.py", "shop.payments")
-    old_symbol = _symbol(
-        system, "shop/payments.py", "PaymentService", "shop.payments.PaymentService"
-    )
+    old_a = _symbol(system, "shop/payments.py", "ScanStore", "shop.payments.ScanStore")
+    old_b = _symbol(system, "shop/payments.py", "ReportState", "shop.payments.ReportState")
+    old_a.metadata = {"kind": "class", "parent_kind": "module"}
+    old_b.metadata = {"kind": "class", "parent_kind": "module"}
     new_module = _module(system, "shop/billing.py", "shop.billing")
-    new_symbol = _symbol(
-        system, "shop/billing.py", "PaymentProcessor", "shop.billing.PaymentProcessor"
-    )
+    new_a = _symbol(system, "shop/billing.py", "BillingScan", "shop.billing.BillingScan")
+    new_b = _symbol(system, "shop/billing.py", "CustomerState", "shop.billing.CustomerState")
+    new_a.metadata = {"kind": "class", "parent_kind": "module"}
+    new_b.metadata = {"kind": "class", "parent_kind": "module"}
+    old_methods = [
+        _symbol(system, "shop/payments.py", "run", f"{entity.qualified_name}.run")
+        for entity in (old_a, old_b)
+    ]
+    new_methods = [
+        _symbol(system, "shop/billing.py", "run", f"{entity.qualified_name}.run")
+        for entity in (new_a, new_b)
+    ]
+    for method in [*old_methods, *new_methods]:
+        method.metadata = {
+            "kind": "method",
+            "parent_kind": "class",
+            "parameters": [{"kind": "positional_or_keyword", "name": "self"}],
+        }
     rename = GitRename(old_path="shop/payments.py", new_path="shop/billing.py", similarity=1.0)
 
     candidates, existing = attach_rename_evidence(
-        [new_module, new_symbol], [old_module, old_symbol], [rename]
+        [new_module, new_a, new_b, *new_methods],
+        [old_module, old_a, old_b, *old_methods],
+        [rename],
     )
     by_id = {e.id: e for e in [*candidates, *existing]}
-    assert _claims_of(by_id[new_symbol.id], IdentityClaimKind.GIT_RENAME) == []
-    assert _claims_of(by_id[old_symbol.id], IdentityClaimKind.GIT_RENAME) == []
-    # The module itself still pairs -- only the symbol-level rename is ambiguous.
-    assert _claims_of(by_id[new_module.id], IdentityClaimKind.GIT_RENAME) != []
+    assert _claims_of(by_id[new_a.id], IdentityClaimKind.GIT_RENAME) == []
+    assert _claims_of(by_id[new_b.id], IdentityClaimKind.GIT_RENAME) == []
+    assert _claims_of(by_id[old_a.id], IdentityClaimKind.GIT_RENAME) == []
+    assert _claims_of(by_id[old_b.id], IdentityClaimKind.GIT_RENAME) == []
+    assert all(
+        _claims_of(by_id[method.id], IdentityClaimKind.GIT_RENAME) == []
+        for method in [*old_methods, *new_methods]
+    )
 
 
 def test_ambiguous_name_collision_within_the_moved_file_gets_no_claim(system: System) -> None:
